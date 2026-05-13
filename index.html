@@ -271,8 +271,7 @@
                     <div class="row is-full-width">
                         <h2 class="title is-3"><span class="dvima">RDA Rewards and Policies</span></h2>
                         <p style="font-size: 125%">
-                            In this demo, we visualize the best RDA rewards on a subset of environments and policies
-                            trained using them.
+                            In this demo, we visualize the best RDA rewards on each environment and policies trained using them.
                         </p>
                     </div>
                 </div>
@@ -282,15 +281,39 @@
                 <div class="column is-half">
                     <p style="font-size: 1.5em"><b>ManiSkill</b></p>
                     <div class="col-md-4 col-sm-4 col-xs-4">
+                         <img src="images/LiftPegUpright-v1.png" width="23%" style="border-radius: 5px;" alt='<b>LiftPegUpright</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/LiftPegUpright-v1-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/PegInsertionSide-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PegInsertionSide</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/PegInsertionSide-v1-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/PickCube-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PickCube</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/PickCube-v1-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/PlaceSphere-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PlaceSphere</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/PlaceSphere-v1-1.txt' onclick="populateDemo(this, 1);">
                         <img src="images/PlugCharger-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PlugCharger</b>, best RDA reward:
                         [sep]
                         rewards/rda/PlugCharger-v1-1.txt' onclick="populateDemo(this, 1);">
                         <img src="images/PokeCube-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PokeCube</b>, best RDA reward:
                         [sep]
                         rewards/rda/PokeCube-v1-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/PullCube-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PullCube</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/PullCube-v1-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/PullCubeTool-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PullCubeTool</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/PullCubeTool-v1-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/PushCube-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PushCube</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/PushCube-v1-1.txt' onclick="populateDemo(this, 1);">
                         <img src="images/PushT-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PushT</b>, best RDA reward:
                         [sep]
                         rewards/rda/PushT-v1-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/RollBall-v1.png" width="23%" style="border-radius: 5px;" alt='<b>RollBall</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/RollBall-v1-1.txt' onclick="populateDemo(this, 1);">
                         <img src="images/StackCube-v1.png" width="23%" style="border-radius: 5px;" alt='<b>StackCube</b>, best RDA reward:
                         [sep]
                         rewards/rda/StackCube-v1-1.txt' onclick="populateDemo(this, 1);">
@@ -299,6 +322,12 @@
                     <br>
                     <p style="font-size: 1.5em"><b>Humanoid Bench</b></p>
                     <div class="col-md-4 col-sm-4 col-xs-4">
+                        <img src="images/h1hand-basketball-v0.png" width="23%" style="border-radius: 5px;" alt='<b>h1hand-basketball</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/h1hand-basketball-v0-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/h1hand-door-v0.png" width="23%" style="border-radius: 5px;" alt='<b>h1hand-door</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/h1hand-door-v0-1.txt' onclick="populateDemo(this, 1);">
                         <img src="images/h1hand-package-v0.png" width="23%" style="border-radius: 5px;" alt='<b>h1hand-package</b>, best RDA reward:
                         [sep]
                         rewards/rda/h1hand-package-v0-1.txt' onclick="populateDemo(this, 1);">
@@ -310,7 +339,7 @@
                 <div class="column is-half">
                     <div class="border rounded" style="padding-top:12px; padding-bottom:12px;">
                         <video id="demo-video-1" class="demo-video" autoplay loop muted webkit-playsinline playsinline
-                            onclick="setAttribute('controls', 'true');" style="width: 50%;">
+                            onclick="setAttribute('controls', 'true');" style="width:100%;">
                             <source id="expandedImg-1" src="videos/placeholder.mp4" type="video/mp4">
                         </video>
                     </div>

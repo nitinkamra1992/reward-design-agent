@@ -1,0 +1,96 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Gather basic tensors and device
+    tcp_p = self.agent.tcp.pose.p  # (n, 3)
+    peg_p = self.peg.pose.p        # (n, 3)
+    n = peg_p.shape[0]
+    device = peg_p.device
+    dtype = peg_p.dtype
+
+    # Temperature/scaling hyperparameters (all positive scalars)
+    t_dist = torch.tensor(0.10, device=device, dtype=dtype)     # distance scale (meters)
+    t_ori = torch.tensor(0.30, device=device, dtype=dtype)      # orientation scale (radians)
+    t_height = torch.tensor(0.02, device=device, dtype=dtype)   # height scale (meters)
+    terminal_scale = torch.tensor(10.0, device=device, dtype=dtype)
+
+    # Subtask 1: Approach the peg (end-effector close to peg center)
+    dist_tcp_peg = torch.linalg.norm(tcp_p - peg_p, dim=1)                           # (n,)
+    reward_approach = torch.exp(-(dist_tcp_peg ** 2) / (t_dist ** 2))                # in [0,1]
+
+    # Subtask 2: Grasp the peg (if available)
+    grasp_mask = torch.zeros(n, device=device, dtype=dtype)
+    try:
+        # is_grasping may not be available for certain agents; handle gracefully
+        gm = self.agent.is_grasping(self.peg)
+        if isinstance(gm, torch.Tensor):
+            grasp_mask = gm.to(dtype=dtype)
+    except Exception:
+        pass
+    reward_grasp = grasp_mask  # in {0,1}
+
+    # Orientation and height calculations
+    q = self.peg.pose.q  # (n, 4)
+    qmat = rotation_conversions.quaternion_to_matrix(q)  # (n, 3, 3)
+    euler = rotation_conversions.matrix_to_euler_angles(qmat, "XYZ")  # (n, 3)
+
+    # Subtask 3: Pivot peg toward vertical (match evaluate: use Z Euler angle)
+    target_angle = torch.pi / 2
+    ori_err = torch.abs(torch.abs(euler[:, 2]) - target_angle)                           # (n,)
+    reward_pivot = torch.exp(-(ori_err ** 2) / (t_ori ** 2))                             # in [0,1]
+
+    # Subtask 4: Set peg center height to half-length (0.12)
+    z = peg_p[:, 2]
+    target_z = torch.tensor(self.peg_half_length, device=device, dtype=dtype)
+    height_err = torch.abs(z - target_z)                                                 # (n,)
+    reward_set_height = torch.exp(-(height_err ** 2) / (t_height ** 2))                  # in [0,1]
+
+    # Subtask 5: Upright and correct height together (synergy reward)
+    reward_upright_and_height = reward_pivot * reward_set_height                         # in [0,1]
+
+    # Optional lift shaping: normalize center height toward target (encourages lifting before fine placement)
+    reward_lift = torch.clamp(z / target_z, min=0.0, max=1.0)                            # in [0,1]
+
+    # Gate orientation/height rewards by proximity or grasp to encourage correct sequence
+    # If close or grasped, emphasize pivot/height shaping more
+    gate = torch.clamp(reward_approach + reward_grasp, min=0.0, max=1.0)
+    reward_pivot_gated = reward_pivot * gate
+    reward_set_height_gated = reward_set_height * gate
+    reward_upright_and_height_gated = reward_upright_and_height * gate
+
+    # Terminal success reward (large bonus)
+    success = self.evaluate()["success"]  # (n,) bool
+    reward_success = success.to(dtype=dtype) * terminal_scale
+
+    # Combine weighted components (all shaped terms are in [0,1])
+    w_approach = 0.25
+    w_grasp = 0.50
+    w_pivot = 0.50
+    w_height = 0.50
+    w_upright_height = 1.00
+    w_lift = 0.20
+
+    reward = (
+        w_approach * reward_approach
+        + w_grasp * reward_grasp
+        + w_pivot * reward_pivot_gated
+        + w_height * reward_set_height_gated
+        + w_upright_height * reward_upright_and_height_gated
+        + w_lift * reward_lift
+        + reward_success
+    )
+
+    # Logging of each component
+    self.reward_info = {
+        "reward_approach": reward_approach,
+        "reward_grasp": reward_grasp,
+        "reward_pivot": reward_pivot,
+        "reward_pivot_gated": reward_pivot_gated,
+        "reward_set_height": reward_set_height,
+        "reward_set_height_gated": reward_set_height_gated,
+        "reward_upright_and_height": reward_upright_and_height,
+        "reward_upright_and_height_gated": reward_upright_and_height_gated,
+        "reward_lift": reward_lift,
+        "reward_success": reward_success,
+        "reward_total": reward,
+    }
+
+    return reward

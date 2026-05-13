@@ -1,0 +1,99 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Vectorized positions
+    tcp_pos = self.agent.tcp.pose.p  # (n, 3)
+    cube_pos = self.cube.pose.p      # (n, 3)
+    goal_pos = self.goal_site.pose.p # (n, 3)
+
+    n = tcp_pos.shape[0]
+    device = tcp_pos.device
+    dtype = tcp_pos.dtype
+
+    # Distances
+    d_tcp_cube = torch.linalg.norm(tcp_pos - cube_pos, dim=1)  # (n,)
+    d_cube_goal = torch.linalg.norm(cube_pos - goal_pos, dim=1)  # (n,)
+
+    # Heights
+    cube_height = cube_pos[:, 2]  # (n,)
+
+    # Booleans from evaluate()
+    eval_dict = self.evaluate()
+    success = eval_dict["success"]  # (n,) bool
+    is_grasped = eval_dict["is_grasped"]  # (n,) bool
+    is_static = eval_dict["is_robot_static"]  # (n,) bool
+
+    # Temperature / normalization constants
+    # These are chosen relative to workspace: ~0.2 m planar, ~0.3 m height
+    t_reach = torch.tensor(0.10, device=device, dtype=dtype)       # for tcp->cube distance
+    t_goal = torch.tensor(0.20, device=device, dtype=dtype)        # for cube->goal distance
+    max_lift = torch.tensor(max(1e-6, self.max_goal_height), device=device, dtype=dtype)  # ~0.3 m
+    table_center_height = torch.tensor(self.cube_half_size, device=device, dtype=dtype)   # cube center at rest
+
+    # Subtask 1: Reach the cube (smooth exponential shaping)
+    # Reward near 1 when tcp is at the cube, decays with distance
+    reward_reach = torch.exp(-d_tcp_cube / t_reach)  # in (0, 1]
+
+    # Subtask 2: Grasp the cube (binary, normalized to [0, 1])
+    reward_grasp = is_grasped.to(dtype)
+
+    # Subtask 3: Lift the cube off the table
+    # Normalize lift height above table (cube center vs table top approx at cube_half_size)
+    lifted_amount = torch.clamp(cube_height - table_center_height, min=0.0)  # (n,)
+    reward_lift = torch.clamp(lifted_amount / max_lift, 0.0, 1.0)            # in [0, 1]
+
+    # Subtask 4: Move cube toward goal (stronger when grasped and lifted)
+    base_goal_progress = torch.exp(-d_cube_goal / t_goal)  # in (0, 1]
+    # Gate by grasp and being off-table to encourage proper transport
+    grasp_gate = torch.clamp(reward_grasp + 0.1, 0.0, 1.0)  # small progress even before grasp, stronger after grasp
+    lift_gate = torch.clamp(reward_lift + 0.1, 0.0, 1.0)    # small progress even before lift, stronger after lift
+    reward_goal = base_goal_progress * grasp_gate * lift_gate
+
+    # Subtask 5: Place within threshold and keep robot static
+    near_goal = (d_cube_goal <= (self.goal_thresh * 2.0))
+    reward_static = (near_goal & is_static).to(dtype)  # reward only when near goal and static
+
+    # Terminal success reward (large, sparse)
+    reward_terminal = success.to(dtype)
+
+    # Action smoothness penalty to discourage jitter (normalized L2 per step)
+    if action is not None and action.ndim >= 2 and action.shape[0] == n:
+        action_l2 = torch.mean(action.pow(2), dim=1)  # per-env mean squared magnitude
+    else:
+        action_l2 = torch.zeros(n, device=device, dtype=dtype)
+    # Convert to a small penalty in [0, ~1] range by tanh squashing
+    action_penalty = torch.tanh(action_l2)  # in [0, 1)
+
+    # Weights for combining components
+    w_reach = 0.5
+    w_grasp = 0.6
+    w_lift = 0.6
+    w_goal = 1.2
+    w_static = 0.3
+    w_terminal = 10.0
+    w_action = 0.02
+
+    # Total reward
+    reward = (
+        w_reach * reward_reach
+        + w_grasp * reward_grasp
+        + w_lift * reward_lift
+        + w_goal * reward_goal
+        + w_static * reward_static
+        + w_terminal * reward_terminal
+        - w_action * action_penalty
+    )
+
+    # Logging each component
+    self.reward_info = {
+        "reward_reach": reward_reach,
+        "reward_grasp": reward_grasp,
+        "reward_lift": reward_lift,
+        "reward_goal": reward_goal,
+        "reward_static": reward_static,
+        "reward_terminal": reward_terminal * w_terminal,  # scale to reflect actual contribution
+        "reward_action_penalty": -w_action * action_penalty,
+        "reward_total": reward,
+        "reward_d_tcp_cube": d_tcp_cube,
+        "reward_d_cube_goal": d_cube_goal,
+    }
+
+    return reward

@@ -1,0 +1,108 @@
+def get_reward(self) -> Tuple[float, Dict]:
+    # Gather state
+    success = self.get_success()[0]
+    door_x = float(self.door_body_pos[0])
+
+    pelvis_pos = self.robot.pelvis_position()
+    pelvis_x = float(pelvis_pos[0])
+    pelvis_z = float(pelvis_pos[2])
+
+    com_vel = self.robot.center_of_mass_velocity()
+    v_x = float(com_vel[0])
+
+    torso_upright = float(self.robot.torso_upright())
+
+    lh_pos = self.robot.left_hand_position()
+    rh_pos = self.robot.right_hand_position()
+    lh_vel = self.robot.left_hand_velocity()
+    rh_vel = self.robot.right_hand_velocity()
+
+    # Normalized components in [0,1]
+    # Upright via height (termination if pelvis_z < 0.5)
+    r_height = np.clip((pelvis_z - 0.5) / (float(_STAND_HEIGHT) - 0.5), 0.0, 1.0)
+    # Upright via torso orientation (assumed near [0,1])
+    r_torso = np.clip(torso_upright, 0.0, 1.0)
+
+    # Progress toward crossing the door plane
+    r_progress = np.clip(pelvis_x / door_x if door_x != 0.0 else 0.0, 0.0, 1.0)
+
+    # Forward speed of COM, gated by stability (encourage locomotion while upright)
+    r_speed_raw = 0.5 * (np.tanh(v_x) + 1.0)  # maps (-inf,inf) -> (0,1)
+    stable_gate = np.clip(0.5 * (r_height + r_torso), 0.0, 1.0)  # [0,1], higher when more upright
+    r_speed_forward = np.clip(r_speed_raw * stable_gate, 0.0, 1.0)
+
+    # Hand proximity to door plane and centerline (encourage manipulation)
+    d_left_x = abs(float(lh_pos[0]) - door_x)
+    d_right_x = abs(float(rh_pos[0]) - door_x)
+    dmin_x = min(d_left_x, d_right_x)
+    sx = 0.5  # scale for x-proximity normalization (meters)
+    r_hand_x = np.clip(1.0 - (dmin_x / sx), 0.0, 1.0)
+
+    d_left_y = abs(float(lh_pos[1]) - float(self.door_body_pos[1]))
+    d_right_y = abs(float(rh_pos[1]) - float(self.door_body_pos[1]))
+    dmin_y = min(d_left_y, d_right_y)
+    sy = 0.4  # scale for y-centering normalization (meters)
+    r_hand_y = np.clip(1.0 - (dmin_y / sy), 0.0, 1.0)
+
+    r_hand_proximity = 0.5 * (r_hand_x + r_hand_y)
+
+    # Hand manipulation reward: tangential (y) + vertical (z) motion near the door plane
+    near_thresh = 0.15  # meters
+    def tangential_vertical_speed(v):
+        vy = float(v[1])
+        vz = float(v[2])
+        s = np.sqrt(vy * vy + vz * vz)
+        # Normalize to [0,1] using tanh; scale factor 2.0 to provide useful dynamic range
+        return 0.5 * (np.tanh(2.0 * s) + 1.0)
+
+    manip_l = tangential_vertical_speed(lh_vel) if d_left_x < near_thresh else 0.0
+    manip_r = tangential_vertical_speed(rh_vel) if d_right_x < near_thresh else 0.0
+    r_hand_push_raw = max(manip_l, manip_r)
+    r_hand_push = np.clip(r_hand_push_raw * stable_gate, 0.0, 1.0)
+
+    # Transition gate: when near the door plane AND hands are aligned, shift incentive from manipulation to locomotion
+    # Engage gate as pelvis approaches the plane (>= ~65% of distance) and hands are near the door/hatch
+    proximity_gate = np.clip((r_progress - 0.65) / (1.0 - 0.65), 0.0, 1.0)  # rises from 0 at 0.65 to 1 at 1.0
+    release_gate = np.clip(proximity_gate * r_hand_proximity, 0.0, 1.0)      # [0,1], higher when ready to transition
+
+    # Terminal success component
+    r_success = 1.0 if success else 0.0
+
+    # Base Weights
+    w_success = 10.0
+    w_progress = 1.5
+    w_hand_proximity = 1.0
+    w_hand_push = 1.3
+    w_upright_height = 0.6
+    w_torso_upright = 0.6
+    w_forward_speed = 0.6
+
+    # Dynamic reweighting (tightly related modifications):
+    # - Reduce manipulation incentive as release_gate increases
+    # - Increase locomotion incentive as release_gate increases
+    w_hand_push_eff = w_hand_push * (1.0 - release_gate)
+    w_forward_speed_eff = w_forward_speed * (1.0 + 1.5 * release_gate)  # up to 2.5x when fully engaged
+
+    # Combine
+    reward = (
+        w_success * r_success
+        + w_progress * r_progress
+        + w_hand_proximity * r_hand_proximity
+        + w_hand_push_eff * r_hand_push
+        + w_upright_height * r_height
+        + w_torso_upright * r_torso
+        + w_forward_speed_eff * r_speed_forward
+    )
+
+    reward_info = {
+        "reward_success": w_success * r_success,
+        "reward_progress_to_door": w_progress * r_progress,
+        "reward_hand_proximity": w_hand_proximity * r_hand_proximity,
+        "reward_hand_push": w_hand_push_eff * r_hand_push,
+        "reward_upright_height": w_upright_height * r_height,
+        "reward_torso_upright": w_torso_upright * r_torso,
+        "reward_forward_speed": w_forward_speed_eff * r_speed_forward,
+        "reward_transition_gate": float(release_gate),
+    }
+    self.reward_info = reward_info
+    return reward, reward_info

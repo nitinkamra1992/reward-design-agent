@@ -1,0 +1,116 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Gather necessary states
+    ee_p = self.agent.tcp.pose.p  # (n, 3)
+    obj_p = self.obj.pose.p       # (n, 3)
+    goal_p = self.goal_region.pose.p  # (n, 3)
+
+    n = ee_p.shape[0]
+    device = ee_p.device
+    eps = 1e-6
+
+    ee_xy = ee_p[..., :2]    # (n, 2)
+    obj_xy = obj_p[..., :2]  # (n, 2)
+    goal_xy = goal_p[..., :2]  # (n, 2)
+
+    # Push direction from cube to goal (normalized)
+    delta = goal_xy - obj_xy
+    delta_norm = torch.linalg.norm(delta, dim=1, keepdims=True) + eps
+    push_dir = delta / delta_norm  # (n, 2)
+
+    # Geometric targets and offsets
+    # End-effector should approach a pre-push pose behind the cube along the line to goal
+    r_offset = self.cube_half_size + 0.03  # desired offset behind the cube in xy
+    desired_ee_xy = obj_xy - push_dir * r_offset  # (n, 2)
+
+    # Target z just above cube top; encourage in-plane pushing without lifting
+    z_target = self.cube_half_size + 0.015
+
+    # Errors for shaping
+    pos_err_xy = torch.linalg.norm(ee_xy - desired_ee_xy, dim=1)  # (n,)
+    err_z = torch.abs(ee_p[..., 2] - z_target)  # (n,)
+
+    # Alignment: vector from ee to cube should align with push_dir (ee behind cube)
+    v_ee_to_obj = obj_xy - ee_xy
+    v_ee_to_obj_norm = torch.linalg.norm(v_ee_to_obj, dim=1, keepdims=True) + eps
+    v_ee_to_obj_hat = v_ee_to_obj / v_ee_to_obj_norm
+    alignment_cos = torch.sum(v_ee_to_obj_hat * push_dir, dim=1)  # in [-1, 1]
+    alignment_score = torch.clamp(alignment_cos, min=0.0, max=1.0)  # favor alignment behind the cube
+
+    # Lateral alignment: perpendicular distance from ee to push line through the cube
+    proj = torch.sum((ee_xy - obj_xy) * push_dir, dim=1, keepdims=True) * push_dir  # projected component
+    perp_vec = (ee_xy - obj_xy) - proj
+    d_perp = torch.linalg.norm(perp_vec, dim=1)  # (n,)
+
+    # Contact/proximity along push direction: closeness to cube surface along line of push
+    dist_center = torch.linalg.norm(ee_xy - obj_xy, dim=1)  # (n,)
+    surface_proximity_err = torch.abs(dist_center - r_offset)  # want ~0 when at surface
+
+    # Goal proximity (object to goal distance)
+    d_goal = torch.linalg.norm(obj_xy - goal_xy, dim=1)  # (n,)
+
+    # Table/contact gating: encourage cube to remain on table (not lifted)
+    lift_amount = torch.relu(obj_p[..., 2] - (self.cube_half_size + 5e-3))  # above table threshold
+    on_table_mask = (obj_p[..., 2] < (self.cube_half_size + 5e-3)).float()
+
+    # Temperatures (separate for each transformed term)
+    t_pre_xy = torch.tensor(0.08, device=device)
+    t_pre_z = torch.tensor(0.02, device=device)
+    t_contact = torch.tensor(0.03, device=device)
+    t_perp = torch.tensor(0.05, device=device)
+    t_goal_prox = torch.tensor(max(self.goal_radius, 0.1), device=device)  # scale with goal radius
+    t_lift_penalty = torch.tensor(0.01, device=device)
+
+    # Helper: exponential decay normalized to [0, 1]
+    def exp_decay(x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        return torch.exp(-torch.clamp(x, min=0.0) / (t + eps))
+
+    # Component rewards
+    r_pre_push_xy = exp_decay(pos_err_xy, t_pre_xy)            # approach pre-push xy pose
+    r_pre_push_z = exp_decay(err_z, t_pre_z)                   # keep ee near table height for pushing
+    r_alignment = alignment_score                              # align ee behind the cube along push direction
+    r_perp_align = exp_decay(d_perp, t_perp)                   # minimize lateral offset to push line
+    r_contact = exp_decay(surface_proximity_err, t_contact)    # proximity to cube surface for stable contact
+    r_goal_proximity = exp_decay(d_goal, t_goal_prox)          # bring cube toward goal region
+    r_table_contact = exp_decay(lift_amount, t_lift_penalty)   # penalize lifting; near 1 when on table
+
+    # Combine subtasks with weights; gate by table contact to discourage lifting the cube
+    w_pre = 0.30
+    w_contact = 0.20
+    w_align = 0.10
+    w_push = 0.60
+
+    r_pre_push = r_pre_push_xy * r_pre_push_z * r_alignment
+    r_stable_contact = r_contact * r_pre_push_z
+    r_push_line = r_perp_align * r_alignment
+
+    shaped_reward = (
+        w_pre * r_pre_push
+        + w_contact * r_stable_contact
+        + w_align * r_push_line
+        + w_push * r_goal_proximity
+    )
+
+    # Apply table/contact gating (soft and hard)
+    shaped_reward = shaped_reward * r_table_contact * (0.5 + 0.5 * on_table_mask)
+
+    # Terminal success bonus
+    success = self.evaluate()["success"].float()  # (n,)
+    terminal_bonus = success * 10.0
+
+    reward = shaped_reward + terminal_bonus
+
+    # Logging for analysis
+    self.reward_info = {
+        "reward_pre_push": r_pre_push,
+        "reward_pre_push_xy": r_pre_push_xy,
+        "reward_pre_push_z": r_pre_push_z,
+        "reward_alignment": r_alignment,
+        "reward_contact": r_stable_contact,
+        "reward_perp_alignment": r_perp_align,
+        "reward_goal_proximity": r_goal_proximity,
+        "reward_table_contact": r_table_contact,
+        "reward_terminal_success": terminal_bonus,
+        "reward_shaped_total": shaped_reward,
+    }
+
+    return reward

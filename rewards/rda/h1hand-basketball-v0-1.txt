@@ -1,0 +1,153 @@
+def get_reward(self) -> Tuple[float, Dict]:
+    # Helper functions for normalization to [0,1]
+    def safe_norm(v):
+        return float(np.linalg.norm(v))
+
+    def exp_reward(x, scale):
+        # Monotonic decreasing, 1 at x=0, approaches 0 as x increases
+        return float(np.exp(-max(0.0, float(x)) / max(1e-6, scale)))
+
+    def gaussian_centered(x, target, sigma):
+        # Peak at target, falls off with squared distance; in (0,1]
+        return float(np.exp(-((float(x) - float(target)) ** 2) / (2.0 * max(1e-6, sigma) ** 2)))
+
+    def tanh_symmetric(x, scale):
+        # Map real to (0,1): 0.5 * (1 + tanh(x/scale))
+        return float(0.5 * (1.0 + np.tanh(float(x) / max(1e-6, scale))))
+
+    # Gather commonly used positions and velocities
+    pelvis_pos = self.robot.pelvis_position()
+    torso_upright = float(self.robot.torso_upright())
+    body_vel = self.robot.body_velocity()
+    left_foot_h = float(self.robot.left_foot_height())
+    right_foot_h = float(self.robot.right_foot_height())
+
+    left_hand_pos = self.robot.left_hand_position()
+    right_hand_pos = self.robot.right_hand_position()
+    left_hand_vel = self.robot.left_hand_velocity()
+    right_hand_vel = self.robot.right_hand_velocity()
+
+    basketball_pos = self._env.named.data.xpos["basketball"]
+    hoop_pos = self._env.named.data.site_xpos["hoop_center"]
+
+    # Distances and directions
+    vec_l_ball = basketball_pos - left_hand_pos
+    vec_r_ball = basketball_pos - right_hand_pos
+    dl = safe_norm(vec_l_ball)
+    dr = safe_norm(vec_r_ball)
+
+    vec_r_hoop = hoop_pos - right_hand_pos
+    d_ball_hoop = safe_norm(basketball_pos - hoop_pos)
+
+    # 1) Balance and stability
+    # Upright torso already in [0,1] if the method is normalized; clamp just in case
+    upright_norm = float(np.clip(torso_upright, 0.0, 1.0))
+    pelvis_height_norm = exp_reward(abs(float(pelvis_pos[2]) - _STAND_HEIGHT), scale=0.30)
+    # Encourage low whole-body velocity
+    stability_vel_norm = exp_reward(safe_norm(body_vel), scale=1.0)
+    # Encourage feet staying near the ground (discourages jumping during balance)
+    feet_grounded_norm = 0.5 * exp_reward(left_foot_h, scale=0.10) + 0.5 * exp_reward(right_foot_h, scale=0.10)
+
+    # 2) Intercept: move hands toward the ball
+    intercept_left_dist_norm = exp_reward(dl, scale=0.30)
+    intercept_right_dist_norm = exp_reward(dr, scale=0.30)
+
+    # Approach progress via velocity projection toward the ball
+    u_l = vec_l_ball / dl if dl > 1e-8 else np.zeros(3)
+    u_r = vec_r_ball / dr if dr > 1e-8 else np.zeros(3)
+    approach_left_norm = tanh_symmetric(float(np.dot(left_hand_vel, u_l)), scale=1.0)
+    approach_right_norm = tanh_symmetric(float(np.dot(right_hand_vel, u_r)), scale=1.0)
+
+    # 3) Catch and secure: ball between hands and close to at least one hand
+    hands_mid = 0.5 * (left_hand_pos + right_hand_pos)
+    d_mid_ball = safe_norm(basketball_pos - hands_mid)
+    catch_secure_norm = exp_reward(d_mid_ball, scale=0.20)
+    catch_close_norm = exp_reward(min(dl, dr), scale=0.15)
+
+    # 4) Shooting-ready pose: right hand height in a reasonable band, ball near right hand
+    # Choose a comfortable pre-shot height near chest/shoulder level
+    right_hand_height = float(right_hand_pos[2])
+    shoot_ready_pose_norm = gaussian_centered(right_hand_height, target=1.40, sigma=0.40)
+
+    # 5) Swing forward: right hand velocity magnitude and direction toward hoop
+    rh_speed = safe_norm(right_hand_vel)
+    swing_speed_norm = float(np.tanh(rh_speed / 3.0))  # saturating speed term in [0,1)
+    # Directional alignment in [0,1], only meaningful if speed > 0
+    if rh_speed > 1e-8 and safe_norm(vec_r_hoop) > 1e-8:
+        dir_align = float(np.dot(right_hand_vel / rh_speed, vec_r_hoop / safe_norm(vec_r_hoop)))
+        dir_align_norm = float(0.5 * (1.0 + np.clip(dir_align, -1.0, 1.0)))
+    else:
+        dir_align_norm = 0.0
+    swing_forward_norm = swing_speed_norm * dir_align_norm
+
+    # 6) Throw accuracy shaping: ball closer to hoop center
+    accuracy_norm = exp_reward(d_ball_hoop, scale=2.0)
+
+    # Terminal success bonus
+    success, _ = self.get_success()
+    success_norm = 1.0 if success else 0.0
+
+    # Weights for each normalized component
+    w_upright = 0.15
+    w_pelvis_height = 0.10
+    w_stability_vel = 0.05
+    w_feet_grounded = 0.05
+
+    w_intercept_left = 0.10
+    w_intercept_right = 0.10
+    w_approach_left = 0.05
+    w_approach_right = 0.05
+
+    w_catch_secure = 0.12
+    w_catch_close = 0.08
+
+    w_shoot_ready_pose = 0.08
+    w_swing_forward = 0.12
+
+    w_accuracy = 0.30
+
+    w_success = 8.0  # large one-time terminal reward
+
+    # Combine weighted components
+    reward = 0.0
+    reward += w_upright * upright_norm
+    reward += w_pelvis_height * pelvis_height_norm
+    reward += w_stability_vel * stability_vel_norm
+    reward += w_feet_grounded * feet_grounded_norm
+
+    reward += w_intercept_left * intercept_left_dist_norm
+    reward += w_intercept_right * intercept_right_dist_norm
+    reward += w_approach_left * approach_left_norm
+    reward += w_approach_right * approach_right_norm
+
+    reward += w_catch_secure * catch_secure_norm
+    reward += w_catch_close * catch_close_norm
+
+    reward += w_shoot_ready_pose * shoot_ready_pose_norm
+    reward += w_swing_forward * swing_forward_norm
+
+    reward += w_accuracy * accuracy_norm
+
+    if success:
+        reward += w_success * success_norm
+
+    # Logging of each component (weighted contributions)
+    self.reward_info = {
+        "reward_upright": w_upright * upright_norm,
+        "reward_pelvis_height": w_pelvis_height * pelvis_height_norm,
+        "reward_stability_velocity": w_stability_vel * stability_vel_norm,
+        "reward_feet_grounded": w_feet_grounded * feet_grounded_norm,
+        "reward_intercept_left": w_intercept_left * intercept_left_dist_norm,
+        "reward_intercept_right": w_intercept_right * intercept_right_dist_norm,
+        "reward_approach_left": w_approach_left * approach_left_norm,
+        "reward_approach_right": w_approach_right * approach_right_norm,
+        "reward_catch_secure": w_catch_secure * catch_secure_norm,
+        "reward_catch_close": w_catch_close * catch_close_norm,
+        "reward_shoot_ready_pose": w_shoot_ready_pose * shoot_ready_pose_norm,
+        "reward_swing_forward": w_swing_forward * swing_forward_norm,
+        "reward_accuracy": w_accuracy * accuracy_norm,
+        "reward_success": w_success * success_norm,
+        "reward_total": reward,
+    }
+
+    return reward, self.reward_info

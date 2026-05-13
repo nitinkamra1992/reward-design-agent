@@ -1,0 +1,125 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Positions
+    tcp_p = self.agent.tcp.pose.p  # (n, 3)
+    obj_p = self.obj.pose.p        # (n, 3)
+    bin_p = self.bin.pose.p        # (n, 3)
+    n = obj_p.shape[0]
+    device = obj_p.device
+
+    # Evaluate current state flags
+    eval_out = self.evaluate()
+    is_grasped = eval_out["is_obj_grasped"]          # (n,) bool
+    is_static = eval_out["is_obj_static"]            # (n,) bool
+    success = eval_out["success"]                    # (n,) bool
+
+    is_grasped_f = is_grasped.float()
+    is_not_grasped_f = 1.0 - is_grasped_f
+    is_static_f = is_static.float()
+    success_f = success.float()
+
+    # Distances
+    tcp_to_obj = obj_p - tcp_p                       # (n, 3)
+    dist_tcp_obj = torch.linalg.norm(tcp_to_obj, dim=1)                     # (n,)
+    dist_tcp_obj_xy = torch.linalg.norm(tcp_to_obj[..., :2], dim=1)         # (n,)
+    obj_to_bin = obj_p - bin_p
+    dist_obj_bin_xy = torch.linalg.norm(obj_to_bin[..., :2], dim=1)         # (n,)
+
+    # Targets and temperatures (scales)
+    # Using exponential and sigmoid shaping, keep each in [0, 1]
+    alpha_approach_3d = 100.0
+    alpha_align_xy = 200.0
+    alpha_bin_xy = 200.0
+    alpha_place_z = 800.0
+    k_above = 50.0
+    k_lift = 80.0
+
+    # Height targets
+    place_target_offset_z = self.radius + self.block_half_size[0]  # final placement z offset target
+    lift_height_target = bin_p[..., 2] + self.radius + self.block_half_size[0] + self.inner_side_half_len  # clearance above bin
+
+    # Shaped components
+    # 1) Move the end-effector close and aligned with sphere (encourage XY alignment and 3D proximity)
+    approach_obj_3d = torch.exp(-alpha_approach_3d * (dist_tcp_obj ** 2))
+    align_xy_obj = torch.exp(-alpha_align_xy * (dist_tcp_obj_xy ** 2))
+    tcp_above_obj = torch.sigmoid(k_above * (tcp_p[..., 2] - obj_p[..., 2]))  # encourage being above the sphere
+
+    # 2) Grasp bonus (binary)
+    grasp_bonus = is_grasped_f
+
+    # 3) Lift the sphere (after grasp)
+    lift_reward = is_grasped_f * torch.sigmoid(k_lift * (obj_p[..., 2] - lift_height_target))
+
+    # 4) Move sphere above bin center (XY)
+    move_above_bin_xy = torch.exp(-alpha_bin_xy * (dist_obj_bin_xy ** 2))
+    move_above_bin_xy = is_grasped_f * move_above_bin_xy
+
+    # 5) Place sphere on top of bin (height shaping around target), stronger when XY is good
+    place_height_error = (obj_p[..., 2] - bin_p[..., 2]) - place_target_offset_z
+    place_height_reward = torch.exp(-alpha_place_z * (place_height_error ** 2))
+    place_height_reward = place_height_reward * torch.exp(-alpha_bin_xy * (dist_obj_bin_xy ** 2))
+
+    # 6) Release and hold static
+    release_reward = is_not_grasped_f * place_height_reward
+    static_reward = is_static_f * release_reward
+
+    # Action smoothness penalty (scaled up near final placement to encourage settling)
+    if isinstance(action, torch.Tensor):
+        if action.ndim == 1:
+            act_norm = torch.linalg.norm(action).expand(n)
+        else:
+            act_norm = torch.linalg.norm(action, dim=1)
+    else:
+        act_norm = torch.zeros(n, device=device)
+    action_penalty = torch.tanh(0.5 * act_norm)  # in [0, 1]
+
+    # Modification: increase motion penalty when placed near target height and released
+    # This encourages the robot to hold still so the sphere becomes static after release.
+    beta_settle = 4.0  # scaling for penalty amplification near final placement
+    settle_factor = is_not_grasped_f * place_height_reward  # in [0,1], high when released and at correct height
+    w_action_penalty = 0.02
+    effective_action_penalty_weight = w_action_penalty * (1.0 + beta_settle * settle_factor)
+
+    # Weights
+    w_approach_3d = 0.15
+    w_align_xy = 0.10
+    w_tcp_above = 0.05
+    w_grasp_bonus = 0.20
+    w_lift = 0.15
+    w_move_bin_xy = 0.15
+    w_place_height = 0.15
+    w_release = 0.05
+    w_static = 0.05
+    success_bonus = 5.0
+
+    # Combine components
+    reward = (
+        w_approach_3d * approach_obj_3d
+        + w_align_xy * align_xy_obj
+        + w_tcp_above * (is_not_grasped_f * tcp_above_obj * align_xy_obj)
+        + w_grasp_bonus * grasp_bonus
+        + w_lift * lift_reward
+        + w_move_bin_xy * move_above_bin_xy
+        + w_place_height * place_height_reward
+        + w_release * release_reward
+        + w_static * static_reward
+        - effective_action_penalty_weight * action_penalty
+        + success_bonus * success_f
+    )
+
+    # Logging
+    self.reward_info = {
+        "reward_approach_obj_3d": w_approach_3d * approach_obj_3d,
+        "reward_align_xy_obj": w_align_xy * align_xy_obj,
+        "reward_tcp_above_obj": w_tcp_above * (is_not_grasped_f * tcp_above_obj * align_xy_obj),
+        "reward_grasp_bonus": w_grasp_bonus * grasp_bonus,
+        "reward_lift_height": w_lift * lift_reward,
+        "reward_move_above_bin_xy": w_move_bin_xy * move_above_bin_xy,
+        "reward_place_height": w_place_height * place_height_reward,
+        "reward_release": w_release * release_reward,
+        "reward_static": w_static * static_reward,
+        "reward_action_penalty": -effective_action_penalty_weight * action_penalty,
+        "reward_action_penalty_settle_boost": -(effective_action_penalty_weight - w_action_penalty) * action_penalty,
+        "reward_success_bonus": success_bonus * success_f,
+    }
+
+    return reward

@@ -1,0 +1,132 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Positions
+    tcp_pos = self.agent.tcp.pose.p  # (n, 3)
+    tool_pos = self.l_shape_tool.pose.p  # (n, 3)
+    cube_pos = self.cube.pose.p  # (n, 3)
+    robot_base_pos = self.agent.robot.get_links()[0].pose.p  # (n, 3)
+    n = tcp_pos.shape[0]
+
+    # Distances
+    tcp_tool_dist = torch.linalg.norm(tcp_pos - tool_pos, dim=1)  # (n,)
+    tool_cube_dist = torch.linalg.norm(tool_pos - cube_pos, dim=1)  # (n,)
+    cube_base_xy_dist = torch.linalg.norm(cube_pos[:, :2] - robot_base_pos[:, :2], dim=1)  # (n,)
+
+    # Workspace progress as in evaluate
+    workspace_center = robot_base_pos.clone()
+    workspace_center[:, 0] += self.arm_reach * 0.1
+    cube_workspace_dist = torch.linalg.norm(cube_pos - workspace_center, dim=1)  # (n,)
+
+    # Temperatures for shaping (normalize into [0, 1])
+    eps = 1e-6
+    temp_tcp_tool = 0.20
+    temp_tool_cube = 0.20
+    temp_cube_base = 0.60
+    k_workspace = 3.0
+    temp_contact = 0.05
+
+    # Subtask 1: approach tool and grasp
+    r_tcp_to_tool = torch.exp(-tcp_tool_dist / temp_tcp_tool)  # [0,1]
+    # Grasp indicator (if available)
+    try:
+        grasp_mask = self.agent.is_grasping(self.l_shape_tool).float()  # (n,)
+    except Exception:
+        # Fallback: no grasp info available
+        grasp_mask = torch.zeros_like(tcp_tool_dist)
+
+    r_grasp = grasp_mask  # already in [0,1]
+
+    # Subtask 2: bring tool near cube (gate by grasp to prioritize picking tool first)
+    r_tool_to_cube = torch.exp(-tool_cube_dist / temp_tool_cube)  # [0,1]
+    r_tool_to_cube_gated = r_tool_to_cube * (0.2 + 0.8 * r_grasp)  # low reward before grasp, high after grasp
+
+    # Far-side approach alignment: tool should be on the far side of the cube w.r.t. the base
+    v_bc = cube_pos[:, :2] - robot_base_pos[:, :2]  # base->cube
+    v_ct = tool_pos[:, :2] - cube_pos[:, :2]  # cube->tool
+    nb = torch.clamp(torch.linalg.norm(v_bc, dim=1), min=eps)
+    nt = torch.clamp(torch.linalg.norm(v_ct, dim=1), min=eps)
+    cos_align = (v_ct * v_bc).sum(dim=1) / (nb * nt)
+    cos_align = torch.clamp(cos_align, -1.0, 1.0)
+    r_far_side_alignment_raw = (cos_align + 1.0) * 0.5  # map [-1,1] -> [0,1]
+
+    # Subtask 3: engage hook (contact proxy via distance threshold)
+    contact_threshold = self.hook_length + self.cube_half_size + 0.04
+    r_contact_smooth = torch.sigmoid((contact_threshold - tool_cube_dist) / max(temp_contact, eps))  # smooth in [0,1]
+    contact_mask = (tool_cube_dist < contact_threshold).float()
+
+    # Far-side alignment gating: modest before contact, full when in contact
+    gate_contact = 0.1 + 0.9 * contact_mask         # small reward before contact, full when in contact
+    gate_grasp = 0.2 + 0.8 * r_grasp                # encourage doing alignment after grasp, but allow small pre-grasp
+    r_far_side_alignment = r_far_side_alignment_raw * gate_contact * gate_grasp
+
+    # Subtask 4 & 5: pull cube toward robot and into goal region
+    r_pull_nearness = torch.exp(-cube_base_xy_dist / temp_cube_base)  # [0,1]
+    r_cube_progress = 1.0 - torch.tanh(k_workspace * cube_workspace_dist)  # (0,1)
+
+    # Modification 1: Tighten alignment gate and remove baseline in pull gate
+    align_thresh = 0.75  # slightly stricter than before to favor true far-side placement
+    temp_align_gate = 0.12  # steeper transition
+    align_gate = torch.sigmoid((r_far_side_alignment_raw - align_thresh) / max(temp_align_gate, eps))  # [0,1]
+
+    # Modification 2: Gate contact reward by far-side alignment to discourage near-side/early contact
+    r_contact_aligned = r_contact_smooth * align_gate  # only reward contact when far-side alignment is good
+
+    # Pulling only when aligned and in contact (no baseline)
+    pull_gate = align_gate * r_contact_smooth  # [0,1], strong when aligned and in contact, ~0 otherwise
+    r_pull_nearness_gated = r_pull_nearness * pull_gate
+    r_cube_progress_gated = r_cube_progress * pull_gate
+
+    # Success condition and terminal bonus (as in evaluate)
+    success_mask = (cube_base_xy_dist < 0.6).float()
+    success_bonus = 5.0 * success_mask  # large terminal reward when success is achieved
+
+    # Action smoothness penalty (small, to reduce jitter), handle None or mismatched shapes
+    if action is None:
+        r_action_penalty = torch.zeros(n, device=tcp_pos.device)
+    else:
+        # Assume action shape (n, d); penalize large magnitudes smoothly
+        act_mag = torch.linalg.norm(action, dim=1)
+        r_action_penalty = 0.01 * torch.tanh(0.5 * act_mag)  # in [0, ~0.01]
+
+    # Weights
+    w_tcp_to_tool = 0.30
+    w_grasp = 0.40
+    w_tool_to_cube = 0.30
+    w_far_side = 0.30
+    w_contact = 0.25
+    w_pull_nearness = 0.50
+    w_cube_progress = 0.60
+    w_success = 1.0  # success_bonus already scaled
+    w_action_penalty = -1.0  # subtract penalty
+
+    # Combine rewards
+    reward = (
+        w_tcp_to_tool * r_tcp_to_tool
+        + w_grasp * r_grasp
+        + w_tool_to_cube * r_tool_to_cube_gated
+        + w_far_side * r_far_side_alignment
+        + w_contact * r_contact_aligned
+        + w_pull_nearness * r_pull_nearness_gated
+        + w_cube_progress * r_cube_progress_gated
+        + w_success * success_bonus
+        + w_action_penalty * r_action_penalty
+    )
+
+    # Logging components
+    self.reward_info = {
+        "reward_tcp_to_tool": r_tcp_to_tool,
+        "reward_grasp": r_grasp,
+        "reward_tool_to_cube": r_tool_to_cube_gated,
+        "reward_far_side_alignment_raw": r_far_side_alignment_raw,
+        "reward_far_side_alignment": r_far_side_alignment,
+        "reward_contact_raw": r_contact_smooth,
+        "reward_contact": r_contact_aligned,
+        "reward_align_gate": align_gate,
+        "reward_pull_gate": pull_gate,
+        "reward_pull_nearness_raw": r_pull_nearness,
+        "reward_pull_nearness": r_pull_nearness_gated,
+        "reward_cube_progress_raw": r_cube_progress,
+        "reward_cube_progress": r_cube_progress_gated,
+        "reward_success_bonus": success_bonus,
+        "reward_action_penalty": -r_action_penalty,
+        "reward_total": reward,
+    }

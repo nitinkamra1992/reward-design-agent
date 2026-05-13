@@ -1,0 +1,127 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Vectorized positions
+    tcp_p = self.agent.tcp.pose.p            # (n, 3)
+    ball_p = self.ball.pose.p                # (n, 3)
+    goal_p = self.goal_region.pose.p         # (n, 3)
+
+    tcp_xy = tcp_p[..., :2]
+    ball_xy = ball_p[..., :2]
+    goal_xy = goal_p[..., :2]
+
+    # Core geometric quantities
+    v_bg = goal_xy - ball_xy                              # ball -> goal
+    d_bg = torch.linalg.norm(v_bg, dim=1)                 # distance ball to goal
+    unit_bg = v_bg / (d_bg.unsqueeze(-1) + 1e-6)
+
+    v_bt = tcp_xy - ball_xy                               # ball -> tcp
+    d_tb = torch.linalg.norm(v_bt, dim=1)                 # tcp to ball distance
+    unit_bt = v_bt / (torch.linalg.norm(v_bt, dim=1).unsqueeze(-1) + 1e-6)
+
+    # Ball velocity (xy)
+    ball_vel = self.ball.linear_velocity                  # (n, 3)
+    ball_vel_xy = ball_vel[..., :2]
+    speed_xy = torch.linalg.norm(ball_vel_xy, dim=1)
+    speed_toward_goal = torch.sum(ball_vel_xy * unit_bg, dim=1)
+    speed_toward_goal_pos = torch.clamp(speed_toward_goal, min=0.0)
+
+    # Temperatures/scales for shaping (all positive)
+    tau_close = 0.07       # closeness to ball
+    tau_z = 0.02           # z alignment of tcp to ball
+    tau_goal = 0.30        # ball proximity to goal
+    tau_speed = 0.40       # push speed toward goal
+    tau_sep = 0.05         # separation after push
+    tau_standoff = 0.05    # behind-ball standoff gating
+
+    # Subtask 1: Approach the ball at table height, aligned to push toward the goal
+    close_score = torch.exp(-d_tb / tau_close)                                # in [0, 1]
+    z_diff = torch.abs(tcp_p[..., 2] - ball_p[..., 2])
+    z_score = torch.exp(-z_diff / tau_z)                                      # in [0, 1]
+    align_cos = torch.sum(unit_bg * (-unit_bt), dim=1)                        # cos between v_bg and -v_bt
+    align_score = (align_cos + 1.0) * 0.5                                     # map to [0, 1]
+
+    # Require TCP to be behind the ball along the goal direction before pushing
+    # s_along > 0 means TCP is behind the ball relative to goal; target standoff ~ 2 * ball_radius
+    s_along = torch.sum(v_bt * (-unit_bg), dim=1)
+    s_target = self.ball_radius * 2.0
+    standoff_gap = torch.clamp(s_target - s_along, min=0.0)
+    standoff_score = torch.exp(-standoff_gap / tau_standoff)                  # in [0, 1], high when sufficiently behind
+
+    # Subtask 2-3: Establish gentle contact and impart rolling motion toward the goal
+    speed_score = 1.0 - torch.exp(-speed_toward_goal_pos / tau_speed)         # in [0, 1]
+    # Gate push reward by being close, aligned, and sufficiently behind the ball
+    push_gate = torch.clamp(0.5 * (close_score + align_score) * standoff_score, min=0.0, max=1.0)
+    push_reward = speed_score * push_gate
+
+    # Subtask 4: Break contact once motion is imparted
+    # Increased threshold to encourage stronger follow-through and momentum before separation
+    sep_speed_threshold = 0.12
+    moving_gate = (speed_toward_goal_pos > sep_speed_threshold).float()
+    sep_dist = torch.clamp(d_tb - self.ball_radius, min=0.0)                  # separation beyond touching
+    sep_score = moving_gate * (1.0 - torch.exp(-sep_dist / tau_sep))          # in [0, 1]
+    # Small penalty for staying in contact while the ball is moving toward goal
+    contact_penalty = moving_gate * (torch.exp(-sep_dist / tau_sep)) * 0.2
+
+    # Subtask 5: Ball within goal radius (proximity shaping + terminal bonus)
+    goal_proximity = torch.exp(-d_bg / tau_goal)                              # in [0, 1]
+
+    # Evaluate success and prepare a reached-next mask to avoid post-success penalties
+    success = self.evaluate()["success"].float()
+    reached_next = torch.maximum(self.reached_status, success)
+
+    # Discourage moving the ball away from the goal (masked after success)
+    wrong_dir_penalty_raw = 0.2 * (1.0 - torch.exp(-torch.clamp(-speed_toward_goal, min=0.0) / tau_speed))
+    wrong_dir_penalty = wrong_dir_penalty_raw * (1.0 - reached_next)
+
+    # Penalize grasping (should push, not hold). Safe fallback if not available.
+    try:
+        grasp_penalty = 0.3 * self.agent.is_grasping(self.ball).float()
+    except Exception:
+        grasp_penalty = torch.zeros_like(d_bg)
+
+    # Near-goal momentum bonus to avoid stopping short of the region
+    # Encourages positive speed toward the goal when close to the target
+    tau_near_goal = 0.20
+    tau_speed_near = 0.25
+    near_goal_factor = torch.exp(-d_bg / tau_near_goal)                        # in [0, 1], high near goal
+    near_goal_speed = 1.0 - torch.exp(-speed_toward_goal_pos / tau_speed_near) # in [0, 1]
+    near_goal_momentum_bonus = 0.8 * near_goal_factor * near_goal_speed        # scaled bonus
+
+    # Terminal one-time success reward
+    terminal_bonus = (1.0 - self.reached_status) * success * 10.0
+    # Update reached_status to ensure one-time bonus
+    self.reached_status = torch.maximum(self.reached_status, success)
+
+    # Combine components (keep overall scale moderate before terminal bonus)
+    approach_reward = 0.5 * close_score + 0.3 * align_score + 0.2 * z_score
+    separation_reward = sep_score
+    goal_reward = 1.2 * goal_proximity
+    total_reward = (
+        approach_reward
+        + push_reward
+        + separation_reward
+        + goal_reward
+        + near_goal_momentum_bonus
+        + terminal_bonus
+        - contact_penalty
+        - wrong_dir_penalty
+        - grasp_penalty
+    )
+
+    # Logging all components
+    self.reward_info = {
+        "reward_approach_close": close_score,
+        "reward_approach_align": align_score,
+        "reward_approach_z": z_score,
+        "reward_approach_standoff": standoff_score,
+        "reward_push_speed": push_reward,
+        "reward_separation": separation_reward,
+        "reward_goal_proximity": goal_proximity * 1.2,  # include weight for visibility
+        "reward_near_goal_momentum": near_goal_momentum_bonus,
+        "reward_contact_penalty": -contact_penalty,
+        "reward_wrong_dir_penalty": -wrong_dir_penalty,
+        "reward_grasp_penalty": -grasp_penalty,
+        "reward_terminal_success": terminal_bonus,
+        "reward_total": total_reward,
+    }
+
+    return total_reward

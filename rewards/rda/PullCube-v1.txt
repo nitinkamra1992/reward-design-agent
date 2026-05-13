@@ -1,0 +1,100 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Gather positions (vectorized tensors of shape (n, 3))
+    tcp_p = self.agent.tcp.pose.p
+    cube_p = self.obj.pose.p
+    goal_p = self.goal_region.pose.p
+
+    # Work in XY plane for placement
+    tcp_xy = tcp_p[..., :2]
+    cube_xy = cube_p[..., :2]
+    goal_xy = goal_p[..., :2]
+
+    # Distances and directions
+    eps = 1e-6
+    dist_cube_goal = torch.linalg.norm(cube_xy - goal_xy, dim=1)  # (n,)
+    v_goal = goal_xy - cube_xy  # (n, 2)
+    v_goal_norm = torch.linalg.norm(v_goal, dim=1)  # (n,)
+    u_goal = v_goal / (v_goal_norm.unsqueeze(-1) + eps)  # unit vector from cube -> goal
+
+    # Define the face center oriented toward the goal direction on the cube
+    face_goal_xy = cube_xy + u_goal * self.cube_half_size  # (n, 2)
+
+    # TCP proximity to that face
+    dist_tcp_face = torch.linalg.norm(tcp_xy - face_goal_xy, dim=1)  # (n,)
+
+    # Z alignment (table height ~ cube center z for contact)
+    tcp_z = tcp_p[..., 2]
+    cube_z = cube_p[..., 2]
+    dz = torch.abs(tcp_z - cube_z)  # (n,)
+
+    # Side alignment: how aligned the tcp->cube vector is with goal direction (we want tcp in front of cube toward goal)
+    v_tcp_from_cube = tcp_xy - cube_xy
+    v_tcp_from_cube_norm = torch.linalg.norm(v_tcp_from_cube, dim=1)
+    # Cosine alignment between v_tcp_from_cube and u_goal
+    dot = (v_tcp_from_cube * u_goal).sum(dim=1)
+    cos_align = dot / (v_tcp_from_cube_norm + eps)  # in [-1, 1]
+    # Frontness: encourage tcp to be on the goal-facing side of the cube (positive projection along u_goal)
+    frontness = torch.sigmoid(dot / (self.cube_half_size + eps))  # ~1 when tcp is in front toward goal
+
+    # Contact proxy: encourage TCP at a radius around the cube consistent with touching its face
+    dist_tcp_cube_xy = torch.linalg.norm(tcp_xy - cube_xy, dim=1)
+    target_contact_dist = self.cube_half_size + 0.01  # slightly in front of the face
+    sigma_contact = 0.02
+    contact_gauss = torch.exp(-0.5 * ((dist_tcp_cube_xy - target_contact_dist) / (sigma_contact + eps)) ** 2)
+
+    # Shaping components with temperatures (normalize to [0, 1])
+    temp_goal = 0.30
+    temp_face = 0.05
+    temp_z = 0.02
+
+    r_goal_dist = torch.exp(-dist_cube_goal / temp_goal)  # closer to goal => higher
+    r_face_proximity = torch.exp(-dist_tcp_face / temp_face)
+    r_z_align = torch.exp(-dz / temp_z)
+    # Map cosine alignment [-1,1] -> [0,1]
+    r_side_alignment = (cos_align.clamp(min=-1.0, max=1.0) + 1.0) * 0.5
+
+    # Encourage contact on the correct face by gating proximity with frontness
+    r_face_contact = r_face_proximity * frontness
+
+    # Action smoothness penalty (small)
+    action_mag = torch.linalg.norm(action, dim=1) if action is not None else torch.zeros_like(dist_cube_goal)
+    temp_act = 0.5
+    action_penalty = -0.02 * torch.tanh(action_mag / temp_act)
+
+    # Success bonus (terminal-style)
+    success_mask = (dist_cube_goal < self.goal_radius).float()
+    success_bonus = 5.0 * success_mask
+
+    # Combine shaping rewards with weights (sum ~ [0, 1])
+    w_goal = 0.50
+    w_face_contact = 0.25
+    w_z = 0.10
+    w_align = 0.10
+    w_contact = 0.05
+
+    shaping = (
+        w_goal * r_goal_dist
+        + w_face_contact * r_face_contact
+        + w_z * r_z_align
+        + w_align * r_side_alignment
+        + w_contact * contact_gauss
+    )
+
+    reward = shaping + action_penalty + success_bonus
+
+    # Logging
+    self.reward_info = {
+        'reward_goal_distance': r_goal_dist,
+        'reward_face_proximity': r_face_proximity,
+        'reward_frontness': frontness,
+        'reward_face_contact': r_face_contact,
+        'reward_z_alignment': r_z_align,
+        'reward_side_alignment': r_side_alignment,
+        'reward_contact_gaussian': contact_gauss,
+        'reward_action_penalty': action_penalty,
+        'reward_success_bonus': success_bonus,
+        'reward_total_shaping': shaping,
+        'reward_total': reward,
+    }
+
+    return reward

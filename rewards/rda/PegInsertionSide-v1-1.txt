@@ -1,0 +1,120 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Dense reward shaping for PegInsertionSide-v1
+    # Encourages: approach -> grasp -> move laterally to hole -> align -> insert.
+    import torch
+
+    device = self.device
+    dtype = self.peg.pose.p.dtype
+    n = self.peg.pose.p.shape[0]
+
+    # Positions
+    tcp_p = self.agent.tcp.pose.p  # (n, 3)
+    peg_center_p = self.peg.pose.p  # (n, 3)
+    # Peg head (orange end) world position (peg local +x direction)
+    peg_head_p = (self.peg.pose * self.peg_head_offsets).p  # (n, 3)
+    # Box hole center world position (center offsets in y/z, local x=0)
+    box_hole_p = (self.box.pose * self.box_hole_offsets).p  # (n, 3)
+
+    # Success signal for terminal reward
+    eval_dict = self.evaluate()
+    success = eval_dict["success"]
+    success_f = success.to(dtype=dtype)
+
+    # Temperatures (normalization scales) for exponential transforms
+    temp_approach = torch.tensor(0.20, device=device, dtype=dtype)   # meters
+    temp_move = torch.tensor(0.10, device=device, dtype=dtype)       # meters (lateral-only)
+    temp_yz_align = torch.tensor(0.05, device=device, dtype=dtype)   # meters
+    temp_z_align = torch.tensor(0.05, device=device, dtype=dtype)    # meters
+    temp_insert = torch.tensor(0.15, device=device, dtype=dtype)     # meters
+    temp_push = torch.tensor(0.04, device=device, dtype=dtype)       # meters (penetration depth)
+
+    # Weights for combining components
+    w_approach = torch.tensor(0.30, device=device, dtype=dtype)
+    w_grasp = torch.tensor(0.50, device=device, dtype=dtype)
+    w_move = torch.tensor(1.00, device=device, dtype=dtype)
+    w_align_orient = torch.tensor(0.50, device=device, dtype=dtype)
+    w_align_yz = torch.tensor(0.40, device=device, dtype=dtype)
+    w_align_z = torch.tensor(0.40, device=device, dtype=dtype)
+    w_insert = torch.tensor(1.20, device=device, dtype=dtype)
+    w_push = torch.tensor(1.00, device=device, dtype=dtype)
+    terminal_scale = torch.tensor(10.0, device=device, dtype=dtype)
+
+    # Subtask 1: Approach the peg
+    d_tcp_peg = torch.norm(tcp_p - peg_center_p, dim=-1)  # (n,)
+    reward_approach_peg = torch.exp(-d_tcp_peg / temp_approach)
+
+    # Subtask 1/2: Grasp detection
+    is_grasp = self.agent.is_grasping(self.peg).to(dtype=dtype)
+    reward_grasp = is_grasp  # already in [0,1]
+
+    # Subtask 3: Move peg head laterally (y,z) to hole entrance center
+    diff_head_hole = peg_head_p - box_hole_p
+    dyz_head = torch.norm(diff_head_hole[:, 1:], dim=-1)
+    reward_move_to_hole = torch.exp(-dyz_head / temp_move) * (0.2 + 0.8 * is_grasp)
+
+    # Subtask 4: Align peg orientation with box insertion axis (local +x)
+    peg_x_dir = peg_head_p - peg_center_p
+    peg_x_dir = peg_x_dir / (torch.norm(peg_x_dir, dim=-1, keepdim=True) + 1e-8)
+
+    # Box +x direction
+    offset_local_x = torch.zeros((n, 3), device=device, dtype=dtype)
+    offset_local_x[:, 0] = 1.0
+    offset_pose = Pose.create_from_pq(p=offset_local_x)
+    box_x_point = (self.box.pose * offset_pose).p
+    box_x_dir = box_x_point - self.box.pose.p
+    box_x_dir = box_x_dir / (torch.norm(box_x_dir, dim=-1, keepdim=True) + 1e-8)
+
+    orient_dot = torch.sum(peg_x_dir * box_x_dir, dim=-1)  # [-1, 1]
+    reward_align_orientation = torch.clamp(orient_dot, min=0.0) * (0.2 + 0.8 * is_grasp)
+
+    # Subtask 4: Lateral (y,z) alignment and vertical alignment of head to hole
+    dyz = torch.norm(diff_head_hole[:, 1:], dim=-1)
+    dz = torch.abs(diff_head_hole[:, 2])
+    reward_align_yz = torch.exp(-dyz / temp_yz_align) * (0.2 + 0.8 * is_grasp)
+    reward_align_z = torch.exp(-dz / temp_z_align) * (0.2 + 0.8 * is_grasp)
+
+    # Subtask 5: Insertion progress (white end near box center)
+    tail_offsets = torch.zeros((n, 3), device=device, dtype=dtype)
+    tail_offsets[:, 0] = -self.peg_half_sizes[:, 0]
+    tail_offset_pose = Pose.create_from_pq(p=tail_offsets)
+    peg_tail_p = (self.peg.pose * tail_offset_pose).p
+    d_tail_to_center = torch.norm(peg_tail_p - box_hole_p, dim=-1)
+    reward_insertion_progress = torch.exp(-d_tail_to_center / temp_insert) * (0.1 + 0.9 * is_grasp)
+
+    # Closely related addition: reward pushing along +x (penetration depth), gated by alignment
+    # s > 0 when the orange tip is inside the box along +x relative to the hole plane (x=0)
+    s = torch.sum((peg_head_p - box_hole_p) * box_x_dir, dim=-1)
+    s_pos = torch.relu(s)
+    reward_push_depth = (1.0 - torch.exp(-s_pos / temp_push)) * (0.2 + 0.8 * is_grasp) * reward_align_yz * reward_align_orientation
+
+    # Terminal reward for success
+    reward_success_terminal = terminal_scale * success_f
+
+    # Combine components
+    reward = (
+        w_approach * reward_approach_peg
+        + w_grasp * reward_grasp
+        + w_move * reward_move_to_hole
+        + w_align_orient * reward_align_orientation
+        + w_align_yz * reward_align_yz
+        + w_align_z * reward_align_z
+        + w_insert * reward_insertion_progress
+        + w_push * reward_push_depth
+        + reward_success_terminal
+    )
+
+    # Logging of components
+    self.reward_info = {
+        "reward_approach_peg": reward_approach_peg,
+        "reward_grasp": reward_grasp,
+        "reward_move_to_hole": reward_move_to_hole,
+        "reward_align_orientation": reward_align_orientation,
+        "reward_align_yz": reward_align_yz,
+        "reward_align_z": reward_align_z,
+        "reward_insertion_progress": reward_insertion_progress,
+        "reward_push_depth": reward_push_depth,
+        "reward_success_terminal": reward_success_terminal,
+        "reward_total": reward,
+    }
+
+    return reward
