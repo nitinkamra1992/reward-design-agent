@@ -1,0 +1,116 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Device and batch size
+    device = self.cube.pose.p.device
+    n = self.cube.pose.p.shape[0]
+
+    # Poses and helpful vectors (vectorized over n envs)
+    tcp_pos = self.agent.tcp.pose.p
+    peg_pos = self.peg.pose.p
+    cube_pos = self.cube.pose.p
+    goal_pos = self.goal_region.pose.p
+    peg_head_pos = self.peg_head_pos  # provided by the env (used in evaluate)
+
+    # Distances and directions
+    tcp_to_peg = peg_pos - tcp_pos
+    dist_tcp_peg = torch.linalg.norm(tcp_to_peg[..., :3], dim=1)
+
+    head_to_cube_xy = peg_head_pos[..., :2] - cube_pos[..., :2]
+    dist_head_cube_xy = torch.linalg.norm(head_to_cube_xy, dim=1)
+
+    cube_to_goal_xy = goal_pos[..., :2] - cube_pos[..., :2]
+    dist_cube_goal_xy = torch.linalg.norm(cube_to_goal_xy, dim=1)
+
+    # Normalized push-side alignment: peg head should be on the opposite side of the cube, relative to the goal
+    eps = 1e-6
+    u_cg = cube_to_goal_xy / (dist_cube_goal_xy.clamp_min(eps)).unsqueeze(-1)  # direction from cube to goal
+    u_ch = head_to_cube_xy / (dist_head_cube_xy.clamp_min(eps)).unsqueeze(-1)  # direction from cube to head
+    # Prefer peg head behind the cube w.r.t. the goal => u_ch ≈ -u_cg
+    side_dot = (-u_cg * u_ch).sum(dim=1).clamp(-1.0, 1.0)
+    side_alignment = 0.5 * (side_dot + 1.0)  # in [0,1]
+
+    # Evaluate to get booleans and angle difference
+    ev = self.evaluate()
+    success = ev["success"]
+    is_peg_cube_fit = ev["is_peg_cube_fit"]
+    is_grasped = ev["is_peg_grasped"]
+    angle_diff = ev["angle_diff"]
+    is_static = self.agent.is_static(0.2)
+
+    # Temperature parameters (per-term)
+    tau_reach = 0.10     # m
+    tau_approach = 0.03  # m (tight approach to cube)
+    tau_angle = 0.10     # rad
+    tau_goal = 0.15      # m
+    tau_near = 0.03      # m (for weighting alignment/side by proximity)
+
+    # Dense shaping terms in [0,1]
+    r_reach = torch.exp(-dist_tcp_peg / tau_reach)  # encourage moving TCP to peg
+    r_grasp = is_grasped.float()                    # grasp bonus
+
+    near_weight = torch.exp(-dist_head_cube_xy / tau_near)
+    r_approach = torch.exp(-dist_head_cube_xy / tau_approach)  # bring peg head close to cube
+    r_align = torch.exp(-angle_diff / tau_angle) * near_weight  # align peg yaw with cube yaw, weighted by proximity
+    r_side = side_alignment * near_weight                        # be on the correct pushing side, weighted by proximity
+
+    r_goal = torch.exp(-dist_cube_goal_xy / tau_goal)            # cube close to goal
+
+    # Fit/contact bonus (aligned + close)
+    r_fit = is_peg_cube_fit.float()
+
+    # Encourage staying static when near/at goal
+    r_static = (is_static & (dist_cube_goal_xy < self.goal_radius)).float()
+
+    # Gate progression by grasp state (softly)
+    grasp_gate_soft = 0.5 + 0.5 * r_grasp  # in [0.5, 1]
+    r_approach_eff = r_approach * grasp_gate_soft
+    r_align_eff = r_align * r_grasp        # meaningful when grasped
+    r_side_eff = r_side * r_grasp          # meaningful when grasped
+    r_goal_eff = r_goal * grasp_gate_soft  # emphasize goal after grasp
+
+    # Weights for combining terms
+    w_reach = 0.2
+    w_grasp = 0.5
+    w_approach = 0.5
+    w_align = 0.3
+    w_side = 0.3
+    w_goal = 1.5
+    w_fit = 0.5
+    w_static = 0.2
+
+    # Terminal success bonus
+    terminal_bonus = 5.0
+    r_success = success.float() * terminal_bonus
+
+    # Total reward
+    reward = (
+        w_reach * r_reach
+        + w_grasp * r_grasp
+        + w_approach * r_approach_eff
+        + w_align * r_align_eff
+        + w_side * r_side_eff
+        + w_goal * r_goal_eff
+        + w_fit * r_fit
+        + w_static * r_static
+        + r_success
+    )
+
+    # Logging components
+    self.reward_info = {
+        "reward_reach": w_reach * r_reach,
+        "reward_grasp": w_grasp * r_grasp,
+        "reward_approach": w_approach * r_approach_eff,
+        "reward_align": w_align * r_align_eff,
+        "reward_side": w_side * r_side_eff,
+        "reward_goal": w_goal * r_goal_eff,
+        "reward_fit": w_fit * r_fit,
+        "reward_static": w_static * r_static,
+        "reward_success": r_success,
+        "reward_total": reward,
+        # Optional diagnostics (not used in optimization but useful to monitor)
+        "reward_diag_dist_tcp_peg": dist_tcp_peg,
+        "reward_diag_dist_head_cube_xy": dist_head_cube_xy,
+        "reward_diag_dist_cube_goal_xy": dist_cube_goal_xy,
+        "reward_diag_angle_diff": angle_diff,
+    }
+
+    return reward

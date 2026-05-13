@@ -1,0 +1,96 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Positions (n, 3)
+    tcp_p = self.agent.tcp.pose.p
+    pos_A = self.cubeA.pose.p
+    pos_B = self.cubeB.pose.p
+    n = pos_A.shape[0]
+
+    # Useful scalars
+    h = self.cube_half_size[2]  # half size along z (scalar)
+
+    # Temperatures for shaping (separate per term)
+    temp_move = 0.10          # approach distance
+    temp_top = 0.02           # being above cubeA top face
+    temp_xy_align = 0.05      # xy alignment over cubeB
+    temp_z_place = 0.01       # z placement precision
+    temp_lift = 0.02          # lifting above cubeB
+    # Static is boolean; no temperature transform needed
+
+    # Subtask 1: Move EE to grasp pose over the red cube
+    d_tcp_A = torch.linalg.norm(pos_A - tcp_p, dim=1)                      # (n,)
+    approach = torch.exp(-d_tcp_A / temp_move)                             # [0,1]
+    # Encourage being above cubeA top face
+    above_top = torch.sigmoid((tcp_p[:, 2] - (pos_A[:, 2] + h)) / temp_top)  # [0,1]
+    approach_over_top = 0.5 * approach + 0.5 * above_top                   # [0,1]
+
+    # Subtask 2: Close gripper to grasp the red cube
+    grasp_flag = self.agent.is_grasping(self.cubeA).float()                # (n,)
+
+    # Subtask 3: Lift the red cube to a safe height (relative to cubeB)
+    # Target pre-place height: center of A ~ center of B + 2*h + margin
+    lift_target = pos_B[:, 2] + 2.0 * h + 0.02
+    lift_progress = torch.sigmoid((pos_A[:, 2] - lift_target) / temp_lift) # [0,1]
+    lift_reward = grasp_flag * lift_progress
+
+    # Subtask 4: Move the red cube above the green cube (xy alignment)
+    xy_offset = torch.linalg.norm((pos_A[:, :2] - pos_B[:, :2]), dim=1)    # (n,)
+    align_xy = torch.exp(-xy_offset / temp_xy_align)                       # [0,1]
+    move_above_B = grasp_flag * align_xy
+
+    # Subtask 5: Lower and place the red cube onto the top face of the green cube (z alignment)
+    z_err = torch.abs((pos_A[:, 2] - pos_B[:, 2]) - 2.0 * h)               # (n,)
+    place_z = torch.exp(-z_err / temp_z_place)                             # [0,1]
+
+    # Proxy for being on top: combine xy and z precision
+    on_top_proxy = align_xy * place_z                                      # [0,1]
+
+    # Subtask 6: Open the gripper to release the red cube (prefer releasing when well aligned)
+    release_flag = (~self.agent.is_grasping(self.cubeA)).float()           # (n,)
+    release_reward = release_flag * on_top_proxy                            # [0,1] gated by alignment
+
+    # Subtask 7: Ensure cubeA is static and not grasped when on top
+    static_flag = self.cubeA.is_static(lin_thresh=1e-2, ang_thresh=0.5).float()  # (n,)
+    static_reward = static_flag * on_top_proxy                              # [0,1]
+
+    # Terminal success bonus (one-time if env terminates on success)
+    eval_dict = self.evaluate()
+    success = eval_dict["success"].float()                                  # (n,)
+    success_bonus = 5.0 * success
+
+    # Combine components with moderate scaling
+    w_approach = 0.5
+    w_grasp = 1.0
+    w_lift = 0.5
+    w_move_above = 0.7
+    w_place = 1.0
+    w_release = 1.0
+    w_static = 0.5
+
+    reward = (
+        w_approach * approach_over_top +
+        w_grasp * grasp_flag +
+        w_lift * lift_reward +
+        w_move_above * move_above_B +
+        w_place * place_z +
+        w_release * release_reward +
+        w_static * static_reward +
+        success_bonus
+    )
+
+    # Logging components
+    self.reward_info = {
+        "reward_approach": approach,
+        "reward_above_cubeA": above_top,
+        "reward_approach_over_top": approach_over_top,
+        "reward_grasp": grasp_flag,
+        "reward_lift": lift_reward,
+        "reward_align_xy": align_xy,
+        "reward_place_z": place_z,
+        "reward_on_top_proxy": on_top_proxy,
+        "reward_release": release_reward,
+        "reward_static": static_reward,
+        "reward_success": success_bonus,
+        "reward_total": reward,
+    }
+
+    return reward

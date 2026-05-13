@@ -1,0 +1,90 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Gather key poses (vectorized tensors of shape (n, 3) for positions, (n, 4) for quaternions)
+    ee_pos = self.agent.tcp.pose.p
+    obj_pos = self.obj.pose.p
+    goal_pos = self.goal_tee.pose.p
+
+    n = ee_pos.shape[0]
+    device = ee_pos.device
+
+    ee_xy = ee_pos[:, :2]
+    obj_xy = obj_pos[:, :2]
+    goal_xy = goal_pos[:, :2]
+    ee_z = ee_pos[:, 2]
+    obj_z = obj_pos[:, 2]
+
+    # Temperatures for shaping (distinct for each transformed term)
+    temp_ee_obj = torch.tensor(0.15, device=device, dtype=torch.float32)         # meters
+    temp_height = torch.tensor(0.03, device=device, dtype=torch.float32)         # meters
+    temp_obj_goal = torch.tensor(0.20, device=device, dtype=torch.float32)       # meters
+    temp_orient = torch.tensor(0.40, device=device, dtype=torch.float32)         # radians (unused after change, kept for logging consistency)
+
+    # 1) End-effector proximity to object (encourages moving adjacent to the T block)
+    d_ee_obj = torch.linalg.norm(ee_xy - obj_xy, dim=1)                          # (n,)
+    r_ee_obj_proximity = torch.exp(-d_ee_obj / temp_ee_obj)                      # [0,1]
+
+    # 2) Height alignment for pushing (encourages contact-ready vertical alignment)
+    d_z = torch.abs(ee_z - obj_z)                                                # (n,)
+    r_ee_height_alignment = torch.exp(-d_z / temp_height)                        # [0,1]
+
+    # 3) Object proximity to goal (encourages pushing the T toward goal region)
+    d_obj_goal = torch.linalg.norm(obj_xy - goal_xy, dim=1)                      # (n,)
+    r_obj_goal_proximity = torch.exp(-d_obj_goal / temp_obj_goal)                # [0,1]
+
+    # 4) Orientation alignment to goal (yaw-only, encourages correct rotation)
+    #    Use cosine-based mapping for a stronger signal across wide yaw errors.
+    obj_R = self.quat_to_zrot(self.obj.pose.q)                                   # (n, 3, 3)
+    yaw_obj = torch.atan2(obj_R[:, 1, 0], obj_R[:, 0, 0])                        # (n,)
+    goal_yaw = torch.full((n,), float(self.goal_z_rot), device=device)           # (n,)
+    yaw_diff = torch.atan2(torch.sin(yaw_obj - goal_yaw), torch.cos(yaw_obj - goal_yaw)).abs()
+    r_orientation = 0.5 * (torch.cos(yaw_diff) + 1.0)                            # [0,1], smoother and larger than exp
+
+    # 5) Push-face alignment: place EE on the side of the object opposite the goal direction
+    #    This encourages making contact on a suitable face and pushing in the right direction.
+    v_obj_to_goal = goal_xy - obj_xy                                             # (n,2)
+    v_ee_to_obj = obj_xy - ee_xy                                                 # (n,2)
+    eps = 1e-6
+    v_og_norm = torch.clamp(torch.linalg.norm(v_obj_to_goal, dim=1), min=eps)    # (n,)
+    v_eo_norm = torch.clamp(torch.linalg.norm(v_ee_to_obj, dim=1), min=eps)      # (n,)
+    cos_align = (v_obj_to_goal[:, 0] * v_ee_to_obj[:, 0] + v_obj_to_goal[:, 1] * v_ee_to_obj[:, 1]) / (v_og_norm * v_eo_norm)
+    r_push_alignment = (cos_align + 1.0) * 0.5                                   # map cos in [-1,1] to [0,1]
+
+    # 6) Fine placement via intersection area (coverage with goal T)
+    inter_area = self.pseudo_render_intersection()                               # (n,), fraction in [0,1]
+    r_intersection = torch.clamp(inter_area, 0.0, 1.0)
+
+    # Success condition and terminal bonus
+    success_mask = inter_area >= self.intersection_thresh
+    success_bonus = success_mask.float() * 5.0                                   # large one-time terminal reward
+
+    # Combine components (weights tuned to emphasize orientation correction)
+    w_ee_obj = 0.20
+    w_height = 0.10
+    w_alignment = 0.20
+    w_obj_goal = 0.30
+    w_orient = 0.35      # increased to prioritize yaw correction
+    w_intersection = 0.40  # slightly reduced to prevent overshadowing orientation
+
+    dense_sum = (
+        w_ee_obj * r_ee_obj_proximity
+        + w_height * r_ee_height_alignment
+        + w_alignment * r_push_alignment
+        + w_obj_goal * r_obj_goal_proximity
+        + w_orient * r_orientation
+        + w_intersection * r_intersection
+    )
+
+    reward = dense_sum + success_bonus
+
+    # Logging each component for diagnostics
+    self.reward_info = {
+        'reward_ee_obj_proximity': r_ee_obj_proximity,
+        'reward_ee_height_alignment': r_ee_height_alignment,
+        'reward_push_alignment': r_push_alignment,
+        'reward_obj_goal_proximity': r_obj_goal_proximity,
+        'reward_orientation': r_orientation,
+        'reward_intersection': r_intersection,
+        'reward_success_bonus': success_bonus,
+        'reward_success': success_mask.float(),
+        'reward_total': reward,
+    }

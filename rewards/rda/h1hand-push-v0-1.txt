@@ -1,0 +1,118 @@
+def get_reward(self) -> Tuple[float, Dict]:
+    # Gather necessary observations
+    goal = self.goal.copy()
+    box_pos = self._env.data.qpos.flat.copy()[-7:-4]
+    dofadr = self._env.named.model.body_dofadr["object"]
+    box_vel = self._env.data.qvel.flat.copy()[dofadr : dofadr + 3]
+    left_hand_pos = self.robot.left_hand_position()
+    left_hand_vel = self.robot.left_hand_velocity()
+    pelvis_height = self.robot.pelvis_position()[2]
+
+    # Success check
+    success, _ = self.get_success()
+    goal_dist = self.goal_dist()
+
+    # Scales for normalization (all components mapped to [0,1])
+    eps = 1e-8
+    hand_box_dist_scale = 0.3          # m
+    table_height_scale = 0.10          # m
+    push_speed_scale = 0.4             # m/s
+    goal_dist_scale = 0.6              # m
+    # Modified: make near-goal gate depend on distance to success threshold and be sharper
+    success_radius = 0.05              # m (environment success threshold)
+    near_goal_margin_scale = 0.02      # m (sharper gate around success margin)
+    low_speed_scale = 0.15             # m/s
+    hand_speed_scale = 0.30            # m/s
+
+    # Component 1: Hand-to-box proximity (encourage reaching the box)
+    hand_to_box_dist = float(np.linalg.norm(left_hand_pos - box_pos))
+    hand_to_box_prox_norm = float(np.exp(-hand_to_box_dist / (hand_box_dist_scale + eps)))  # in [0,1]
+
+    # Component 2: Hand height near table (encourage stable contact on tabletop)
+    table_z = float(TABLE_POSITION[2])
+    hand_height_err = float(abs(left_hand_pos[2] - table_z))
+    hand_table_contact_norm = float(np.exp(-hand_height_err / (table_height_scale + eps)))  # in [0,1]
+
+    # Component 3: Push direction alignment toward goal in the XY plane (steering)
+    to_goal_xy = goal[:2] - box_pos[:2]
+    vel_xy = box_vel[:2]
+    dist_xy = float(np.linalg.norm(to_goal_xy))
+    speed_xy = float(np.linalg.norm(vel_xy))
+    u_to_goal_xy = to_goal_xy / (dist_xy + eps)
+    u_vel_xy = vel_xy / (speed_xy + eps)
+    align_xy = float(max(0.0, np.dot(u_vel_xy, u_to_goal_xy)))  # cosine alignment clipped to [0,1]
+    speed_norm = float(min(1.0, speed_xy / (push_speed_scale + eps)))
+    push_toward_goal_norm = align_xy * speed_norm  # in [0,1]
+
+    # Component 4: Goal distance closeness (continuous progress toward success)
+    goal_closeness_norm = float(np.exp(-goal_dist / (goal_dist_scale + eps)))  # in [0,1]
+
+    # Component 5 (modified): Fine-tuning near goal gated by success-margin closeness
+    # Rationale: reduce dithering just outside the success threshold and encourage a decisive final push.
+    margin = float(max(0.0, goal_dist - success_radius))
+    near_gate = float(np.exp(-margin / (near_goal_margin_scale + eps)))  # strong only within a tight margin of success
+    # Encourage small positive speed along the goal direction (decisive short push)
+    aligned_speed = float(max(0.0, np.dot(vel_xy, u_to_goal_xy)))  # projection onto goal direction
+    target_final_speed = 0.06  # m/s, desired modest speed near goal
+    final_speed_sigma = 0.04   # m/s, tolerance around target speed
+    final_push_bump_norm = float(np.exp(-((aligned_speed - target_final_speed) ** 2) / (2.0 * (final_speed_sigma + eps) ** 2)))  # in [0,1]
+
+    left_hand_speed = float(np.linalg.norm(left_hand_vel[:2]))
+    low_hand_speed_norm = float(np.exp(-left_hand_speed / (hand_speed_scale + eps)))  # in [0,1]
+    # Modified finetune term: gate by success-margin proximity
+    finetune_near_goal_norm = near_gate * low_hand_speed_norm * final_push_bump_norm  # in [0,1]
+
+    # Component 6: Balance/uprightness via pelvis height (avoid collapse and maintain posture)
+    balance_upright_norm = float(np.clip((pelvis_height - 0.5) / (ROBOT_STAND_HEIGHT - 0.5 + eps), 0.0, 1.0))
+
+    # Component 7: Hand contact stability (when near box, avoid jittery hand motion)
+    hand_contact_stability_norm = hand_to_box_prox_norm * float(np.exp(-np.linalg.norm(left_hand_vel) / (hand_speed_scale + eps)))
+
+    # Terminal success component
+    success_norm = 1.0 if success else 0.0
+
+    # Weights for each normalized component
+    w_hand_to_box_proximity = 1.2
+    w_hand_table_contact = 0.8
+    w_push_toward_goal = 2.0
+    w_goal_closeness = 2.0
+    w_finetune_near_goal = 1.5
+    w_balance_upright = 1.5
+    w_hand_contact_stability = 1.0
+    w_success_terminal = 10.0
+
+    # Weighted components
+    r_hand_to_box_prox = w_hand_to_box_proximity * hand_to_box_prox_norm
+    r_hand_table_contact = w_hand_table_contact * hand_table_contact_norm
+    r_push_toward_goal = w_push_toward_goal * push_toward_goal_norm
+    r_goal_closeness = w_goal_closeness * goal_closeness_norm
+    r_finetune_near_goal = w_finetune_near_goal * finetune_near_goal_norm
+    r_balance_upright = w_balance_upright * balance_upright_norm
+    r_hand_contact_stability = w_hand_contact_stability * hand_contact_stability_norm
+    r_success_terminal = w_success_terminal * success_norm
+
+    # Combine final reward
+    reward = (
+        r_hand_to_box_prox
+        + r_hand_table_contact
+        + r_push_toward_goal
+        + r_goal_closeness
+        + r_finetune_near_goal
+        + r_balance_upright
+        + r_hand_contact_stability
+        + r_success_terminal
+    )
+
+    # Logging
+    self.reward_info = {
+        "reward_hand_to_box_proximity": r_hand_to_box_prox,
+        "reward_hand_table_contact": r_hand_table_contact,
+        "reward_push_toward_goal": r_push_toward_goal,
+        "reward_goal_closeness": r_goal_closeness,
+        "reward_finetune_near_goal": r_finetune_near_goal,
+        "reward_balance_upright": r_balance_upright,
+        "reward_hand_contact_stability": r_hand_contact_stability,
+        "reward_success_terminal": r_success_terminal,
+    }
+
+    return reward, self.reward_info

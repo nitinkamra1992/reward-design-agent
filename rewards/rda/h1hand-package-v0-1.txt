@@ -1,0 +1,138 @@
+def get_reward(self) -> Tuple[float, Dict]:
+    # Helper functions for normalization
+    def clip01(x):
+        return float(np.clip(x, 0.0, 1.0))
+
+    def exp_norm_positive(x, scale):
+        # Maps positive scalar x to [0,1) using 1 - exp(-x/scale), zero if x <= 0
+        return 0.0 if x <= 0.0 else float(1.0 - np.exp(-x / max(scale, 1e-6)))
+
+    # Retrieve necessary state
+    # Box position and velocity
+    box_pos = self._env.data.qpos.flat.copy()[-7:-4]
+    dofadr = self._env.named.model.body_dofadr["object"]
+    box_vel = self._env.data.qvel.flat.copy()[dofadr : dofadr + 3]
+
+    # Goal position
+    goal = self.goal.copy()
+
+    # Robot state
+    left_hand_pos = self.robot.left_hand_position()
+    left_hand_vel = self.robot.left_hand_velocity()
+    torso_pos = self.robot.torso_position()
+    pelvis_z = self.robot.pelvis_position()[2]
+    torso_upright_val = self.robot.torso_upright()
+
+    # Distances and directions
+    goal_vec = goal - box_pos
+    goal_dist = float(np.linalg.norm(goal_vec))
+    goal_dir_norm = float(np.linalg.norm(goal_vec))
+    goal_dir = goal_vec / goal_dir_norm if goal_dir_norm > 1e-8 else np.zeros(3)
+
+    # Define contact point at the near face of the box (side facing the robot, assumed -x face)
+    contact_point = box_pos - np.array([OBJECT_HALF_SIZE[0], 0.0, 0.0])
+
+    # Component 1: Upright torso (balance/posture)
+    upright_norm = clip01(torso_upright_val)
+
+    # Component 2: Pelvis height (avoid collapse)
+    pelvis_height_norm = clip01((pelvis_z - 0.5) / max(ROBOT_STAND_HEIGHT - 0.5, 1e-6))
+
+    # Component 3: Torso proximity to box (be close to the table/box while facing it)
+    torso_to_box_dist = float(np.linalg.norm(torso_pos - box_pos))
+    torso_proximity_norm = clip01(1.0 - torso_to_box_dist / 1.5)  # 1.5 m scale
+
+    # Component 4: Left hand near the intended contact point on box face
+    hand_to_contact_dist = float(np.linalg.norm(left_hand_pos - contact_point))
+    contact_proximity_norm = clip01(1.0 - hand_to_contact_dist / 0.3)  # 0.3 m scale
+
+    # Component 5: Left hand height alignment with box center height (tabletop-side push)
+    z_diff = abs(float(left_hand_pos[2] - box_pos[2]))
+    z_align_norm = clip01(1.0 - z_diff / 0.2)  # 0.2 m scale
+
+    # Component 6: Stable contact (close and with low relative speed)
+    rel_speed = float(np.linalg.norm(left_hand_vel - box_vel))
+    stable_contact_norm = contact_proximity_norm * clip01(1.0 - rel_speed / 0.4)  # 0.4 m/s scale
+
+    # Component 7: Reduce box-to-goal distance (static closeness)
+    max_goal_dist = 1.0  # conservative normalization bound
+    dist_closeness_norm = clip01(1.0 - goal_dist / max_goal_dist)
+
+    # Component 8: Push velocity toward goal (dynamic progress) with adaptive near-goal sensitivity
+    v_toward_goal = float(np.dot(box_vel, goal_dir))
+    # Near-goal factor increases as goal_dist decreases (0 beyond 0.2 m; ~1 very close)
+    near_goal_factor = clip01(1.0 - goal_dist / 0.2)
+    # Adaptive scale: small near the goal to amplify micro-progress; original scale when far
+    base_scale_far = 0.2
+    min_scale_near = 0.03
+    adaptive_scale = float(min_scale_near + (base_scale_far - min_scale_near) * (1.0 - near_goal_factor))
+    v_progress_norm = exp_norm_positive(v_toward_goal, scale=adaptive_scale)
+
+    # Component 9: Push with contact (encourage progress while maintaining hand contact)
+    push_with_contact_norm = contact_proximity_norm * v_progress_norm  # stays in [0,1]
+
+    # Component 10: Lateral alignment (align Y to reduce steering error)
+    y_diff = abs(float(goal[1] - box_pos[1]))
+    y_align_norm = clip01(1.0 - y_diff / 0.5)  # table y-range ~0.5
+
+    # Component 11: Terminal success reward
+    success = self.get_success()[0]
+    success_norm = 1.0 if success else 0.0
+
+    # Weights for each normalized component
+    w_upright = 0.75
+    w_pelvis_height = 0.75
+    w_torso_proximity = 0.5
+    w_contact_proximity = 1.0
+    w_z_align = 0.5
+    w_stable_contact = 1.0
+    w_dist_closeness = 2.0
+    w_v_progress = 1.5
+    w_push_with_contact = 1.5
+    w_y_align = 1.0
+    w_success = 10.0  # large one-time terminal reward
+
+    # Combine into final reward (sum of weight × normalized_component)
+    reward_upright = w_upright * upright_norm
+    reward_pelvis_height = w_pelvis_height * pelvis_height_norm
+    reward_torso_proximity = w_torso_proximity * torso_proximity_norm
+    reward_contact_proximity = w_contact_proximity * contact_proximity_norm
+    reward_z_align = w_z_align * z_align_norm
+    reward_stable_contact = w_stable_contact * stable_contact_norm
+    reward_dist_closeness = w_dist_closeness * dist_closeness_norm
+    reward_v_progress = w_v_progress * v_progress_norm
+    reward_push_with_contact = w_push_with_contact * push_with_contact_norm
+    reward_y_align = w_y_align * y_align_norm
+    reward_success = w_success * success_norm
+
+    reward = (
+        reward_upright
+        + reward_pelvis_height
+        + reward_torso_proximity
+        + reward_contact_proximity
+        + reward_z_align
+        + reward_stable_contact
+        + reward_dist_closeness
+        + reward_v_progress
+        + reward_push_with_contact
+        + reward_y_align
+        + reward_success
+    )
+
+    # Logging of components
+    self.reward_info = {
+        "reward_upright": reward_upright,
+        "reward_pelvis_height": reward_pelvis_height,
+        "reward_torso_proximity": reward_torso_proximity,
+        "reward_contact_proximity": reward_contact_proximity,
+        "reward_z_align": reward_z_align,
+        "reward_stable_contact": reward_stable_contact,
+        "reward_dist_closeness": reward_dist_closeness,
+        "reward_v_progress": reward_v_progress,
+        "reward_push_with_contact": reward_push_with_contact,
+        "reward_y_align": reward_y_align,
+        "reward_success": reward_success,
+        "reward_total": reward,
+    }
+
+    return reward, self.reward_info

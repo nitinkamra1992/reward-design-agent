@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RDA | Reward Design Agent for Reinforcement Learning</title>
+
+    <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro" rel="stylesheet">
+
+    <link rel="stylesheet" href="./static/css/bulma.min.css">
+    <link rel="stylesheet" href="./static/css/bulma-carousel.min.css">
+    <link rel="stylesheet" href="./static/css/bulma-slider.min.css">
+    <link rel="stylesheet" href="./static/css/fontawesome.all.min.css">
+    <link rel="stylesheet" href="./static/css/academicons.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+    <link rel="stylesheet" href="./static/css/index.css">
+
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+    <script defer src="./static/js/fontawesome.all.min.js"></script>
+    <script src="./static/js/bulma-carousel.min.js"></script>
+    <script src="./static/js/bulma-slider.min.js"></script>
+    <script src="./static/js/index.js"></script>
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</head>
+
+<body>
+    <section class="hero">
+        <div class="hero-body">
+            <div class="container is-max-desktop">
+                <div class="columns is-centered">
+                    <div class="column has-text-centered">
+                        <h1 class="title is-1 publication-title">RDA: Reward Design Agent for Reinforcement Learning
+                        </h1>
+                        <div class="is-size-5 publication-authors">
+                            <span class="author-block">
+                                <a target="_blank" href="https://joonleesky.github.io/">
+                                    Hojoon&#160;Lee</a>
+                                <a href="mailto:joonleesky@kaist.ac.kr">
+                                    <span class="icon">
+                                        <i class="fa fa-envelope"></i>
+                                    </span>
+                                </a>
+                                <sup>1 2</sup>,
+                                <a target="_blank" href="https://ajaysubramanian.com">Ajay&#160;Subramanian</a><sup>1
+                                    3</sup>,
+
+                                <a target="_blank"
+                                    href="https://babbatem.github.io/">Ben&#160;Abbatematteo</a><sup>1</sup>,
+                                <a target="_blank"
+                                    href="https://vijayvee.github.io">Vijay&#160;Veerabadran</a><sup>1</sup>,
+                                <br>
+                                <a target="_blank" href="https://pmatias.xyz/">Pedro&#160;Matias</a><sup>1</sup>,
+                                <a target="_blank"
+                                    href="https://www.linkedin.com/in/karl-ridgeway-5a662634">Karl&#160;Ridgeway</a><sup>1</sup>,
+                                <a target="_blank"
+                                    href="https://nitinkamra1992.github.io/">Nitin&#160;Kamra</a><sup>1</sup>
+                                <a href="mailto:nitinkamra@meta.com">
+                                    <span class="icon">
+                                        <i class="fa fa-envelope"></i>
+                                    </span>
+                                </a>
+                            </span>
+                        </div>
+
+                        <div class="is-size-5 publication-authors">
+                            <span class="author-block"><sup>1</sup>Meta; </span>
+                            <span class="author-block"><sup>2</sup>KAIST; </span>
+                            <span class="author-block"><sup>3</sup>NYU; </span>
+                        </div>
+                        <div class="is-size-5 publication-authors">
+
+                            <span class="author-block">
+                                <span class="icon">
+                                    <i class="fa fa-envelope"></i>
+                                </span>
+                                Corresponding authors: joonleesky@kaist.ac.kr, nitinkamra@meta.com
+                            </span>
+                        </div>
+
+                        <div class="column has-text-centered">
+                            <div class="publication-links">
+                                <span class="link-block">
+                                    <a target="_blank" href=""
+                                        class="external-link button is-normal is-rounded is-dark">
+                                        <span class="icon">
+                                            <i class="ai ai-arxiv"></i>
+                                        </span>
+                                        <span>arXiv</span>
+                                    </a>
+                                </span>
+
+                                <span class="link-block">
+                                    <a target="_blank" href=""
+                                        class="external-link button is-normal is-rounded is-dark">
+                                        <span class="icon">
+                                            <i class="fas fa-file-pdf"></i>
+                                        </span>
+                                        <span>PDF</span>
+                                    </a>
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <span style="display: block; height: -1em;"></span>
+    <section class="section">
+        <div class="container is-max-desktop">
+            <div class="columns is-centered has-text-centered">
+                <div class="column">
+                    <h2 class="title is-3">Abstract</h2>
+                    <div class="content has-text-justified">
+                        <p style="font-size: 125%">
+                            Reinforcement learning has enabled impressive robotic skills, from dexterous manipulation to
+                            humanoid locomotion, but still depends on hand-crafted reward functions that are slow to
+                            design and error-prone. <a href="https://arxiv.org/abs/2310.12931">Eureka</a> reduces this
+                            burden by generating reward code from task instructions with an LLM, but it revises rewards
+                            only from coarse reward statistics, lacking semantic interpretation of behavior and often
+                            inducing reward hacking. We introduce the Reward Design Agent (RDA), a VLM-based agentic
+                            framework that decomposes tasks, semantically evaluates behavior, and iteratively revises
+                            reward code to better follow instructions. Evaluated with GPT-5 on 12 ManiSkill manipulation
+                            tasks and 4 HumanoidBench loco-manipulation tasks, RDA outperforms human-designed rewards
+                            and <a href="https://arxiv.org/abs/2310.12931">Eureka</a>, and is the only method to solve
+                            plug-insertion and humanoid package-delivery. By leveraging semantic evaluation and
+                            reflection, RDA produces instruction-aligned behavior while mitigating the reward-hacking
+                            shortcuts common in other methods.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="section">
+        <div class="container is-max-widescreen">
+            <div class="rows">
+                <div class="rows is-centered ">
+                    <div class="row is-full-width">
+                        <h2 class="title is-3"><span class="dvima">RDA Overview</span></h2>
+                        <div class="columns is-centered has-text-centered">
+                            <img src="images/rda.png" class="interpolation-image" alt=""
+                                style="display: block; margin-left: auto; margin-right: auto" />
+                        </div>
+                        <span style="font-size: 125%">
+                            <strong>Initialization:</strong> Given a natural-language instruction and a simulator
+                            environment, RDA first decomposes the instruction into a list of subtasks. Conditioned on
+                            the instruction, environment, and subtasks, it then generates an initial pool of reward
+                            candidates to seed the search process.
+                            <br>
+                            <strong>Evolutionary Search:</strong> During the evolutionary loop, each reward
+                            function is used to train a policy in simulation. Multiple trajectories are sampled
+                            from each policy and visually evaluated by a Vision-Language Model (VLM), which
+                            produces analysis reports containing subtask-wise scores and evaluation rationales.
+                            These reports are aggregated across trajectories into a summary, which is then used
+                            to revise both the subtask list and the reward code. This process repeats for a
+                            fixed number of iterations.
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="section">
+        <div class="container is-max-widescreen">
+            <div class="rows">
+                <div class="rows is-centered ">
+                    <div class="row is-full-width">
+                        <h2 class="title is-3"><span class="dvima">RDA Evolution Process</span></h2>
+                        <div class="columns is-centered has-text-centered">
+                            <video poster="" id="" autoplay controls muted width="90%" playbackRate=2.0
+                                style="border-radius: 5px;">
+                                <source src="videos/evolution.mp4" type="video/mp4">
+                            </video>
+                        </div>
+                        <span style="font-size: 125%"><b>Example on Humanoid Package.</b>
+                            In this example, the humanoid learns to push the package with its torso rather than both
+                            hands.
+                            RDA’s visual analysis diagnoses this failure mode (weak bilateral hand contact) and refines
+                            the subtask specification and reward function to enforce pushing with bilateral contact.
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="section">
+        <div class="container is-max-widescreen">
+            <div class="rows">
+                <div class="rows is-centered ">
+                    <div class="row is-full-width">
+                        <h2 class="title is-3"><span class="dvima">Experiments</span></h2>
+                        <p style="font-size: 125%">
+                            We thoroughly evaluate RDA on a diverse set of robotic control tasks.
+                        </p>
+                        <br>
+                        <p style="font-size: 125%">
+                            <strong>Environments:</strong>
+                            12 tabletop manipulation tasks in ManiSkill and 4 loco-manipulation tasks in HumanoidBench.
+                            <img src="images/environments.png" class="interpolation-image" alt=""
+                                style="display: block; margin-left: auto; margin-right: auto" />
+                        </p>
+                        <br>
+                        <p style="font-size: 125%">
+                            <strong>Training:</strong>
+                            RDA uses GPT-5 with medium reasoning effort as the VLM backbone.
+                            All policies are trained using SAC + SimbaV2 architecture.
+                            Each run consists of 5 evolutionary iterations, 4 reward candidates and 50M environment
+                            steps on Maniskill (8 reward candidates and 10M environment steps for HumanoidBench).
+
+                        </p>
+                        <br>
+                        <p style="font-size: 125%">
+                            <strong>Evaluation:</strong>
+                            We use two complementary metrics to assess policy:
+                            <span style="display: block; height: 0.5em;"></span>
+                            <span style="display: block; margin-left: 2em;">
+                                <strong>Alignment Rate:</strong>
+                                Measures how well the policy's behavior aligns with the task instruction. We use GPT-4.1 to evaluate 5 rollout videos per trained policy to gauge task instruction alignment on a 5-point Likert scale (normalized in [0,1]).
+                            </span>
+                            <span style="display: block; height: 0.5em;"></span>
+                            <span style="display: block; margin-left: 2em;">
+                                <strong>Success Rate:</strong>
+                                Measures task completion using the binary success indicator provided by each benchmark
+                                (e.g., object within target tolerance).
+                                But does not assess behavioral alignment of the policy with the specified instruction.
+                            </span>
+                            <br>
+                        </p>
+                        <h3 class="title is-4"><span class="dvima">Evaluation Results</span></h3>
+
+                        <img src="images/main_result.png" class="interpolation-image" alt=""
+                            style="display: block; margin-left: auto; margin-right: auto" />
+                        <span style="display: block; height: 0.5em;"></span>
+                        <span style="font-size: 125%">
+                            <span style="font-weight: bold">RDA generates highly task-aligned policies.</span>
+                            On ManiSkill, RDA and <a href="https://arxiv.org/abs/2310.12931">Eureka</a> consistently
+                            outperform human-designed rewards, achieving strong alignment and success.
+                            On HumanoidBench, RDA matches <a href="https://arxiv.org/abs/2310.12931">Eureka</a> in
+                            success and surpasses in alignment, while human rewards fall short.
+                            <a href="https://arxiv.org/abs/2310.12931">Eureka</a>’s lack of visual analysis leads to
+                            mis-specified rewards.
+                        </span>
+                        <br>
+                        <br>
+                        <div class="columns is-centered has-text-centered">
+                            <video poster="" id="" autoplay controls muted width="90%" playbackRate=2.0
+                                style="border-radius: 5px;">
+                                <source src="videos/Eureka_vs_rda.mp4" type="video/mp4">
+                            </video>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="section">
+        <div class="container is-max-widescreen">
+            <div class="rows">
+                <div class="rows is-centered ">
+                    <div class="row is-full-width">
+                        <h2 class="title is-3"><span class="dvima">RDA Rewards and Policies</span></h2>
+                        <p style="font-size: 125%">
+                            In this demo, we visualize the best RDA rewards on a subset of environments and policies
+                            trained using them.
+                        </p>
+                    </div>
+                </div>
+            </div>
+            <br>
+            <div class="columns is-vcentered">
+                <div class="column is-half">
+                    <p style="font-size: 1.5em"><b>ManiSkill</b></p>
+                    <div class="col-md-4 col-sm-4 col-xs-4">
+                        <img src="images/PlugCharger-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PlugCharger</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/PlugCharger-v1-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/PokeCube-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PokeCube</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/PokeCube-v1-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/PushT-v1.png" width="23%" style="border-radius: 5px;" alt='<b>PushT</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/PushT-v1-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/StackCube-v1.png" width="23%" style="border-radius: 5px;" alt='<b>StackCube</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/StackCube-v1-1.txt' onclick="populateDemo(this, 1);">
+                    </div>
+
+                    <br>
+                    <p style="font-size: 1.5em"><b>Humanoid Bench</b></p>
+                    <div class="col-md-4 col-sm-4 col-xs-4">
+                        <img src="images/h1hand-package-v0.png" width="23%" style="border-radius: 5px;" alt='<b>h1hand-package</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/h1hand-package-v0-1.txt' onclick="populateDemo(this, 1);">
+                        <img src="images/h1hand-push-v0.png" width="23%" style="border-radius: 5px;" alt='<b>h1hand-push</b>, best RDA reward:
+                        [sep]
+                        rewards/rda/h1hand-push-v0-1.txt' onclick="populateDemo(this, 1);">
+                    </div>
+                </div>
+                <div class="column is-half">
+                    <div class="border rounded" style="padding-top:12px; padding-bottom:12px;">
+                        <video id="demo-video-1" class="demo-video" autoplay loop muted webkit-playsinline playsinline
+                            onclick="setAttribute('controls', 'true');" style="width: 50%;">
+                            <source id="expandedImg-1" src="videos/placeholder.mp4" type="video/mp4">
+                        </video>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div id="imgtext-1" style="font-size: 1.5em">Select an image above:</div>
+                <div>
+                    <pre
+                        class="p-1"><code class="language-python" id="answer-1">RDA response shown within code block.</code></pre>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="section" id="BibTeX">
+        <div class="container is-max-widescreen content">
+            <h2 class="title">BibTeX</h2>
+            <pre><code>@article{lee2026rda,
+    title   = {Reward Design Agent for Reinforcement Learning},
+    author  = {Hojoon Lee and Ajay Subramanian and Ben Abbatematteo and Vijay Veerabadran and Pedro Matias and Karl Ridgeway and Nitin Kamra},
+    year    = {2026},
+    journal = {Reinforcement Learning Conference (RLC)}
+}
+</code></pre>
+        </div>
+    </section>
+
+    <footer class="footer">
+        <div class="container">
+            <div class="columns is-centered">
+                <div class="column">
+                    <div class="content has-text-centered">
+                        <p>
+                            Website template borrowed from <a
+                                href="https://github.com/nerfies/nerfies.github.io">NeRFies</a> and <a
+                                href="https://eureka-research.github.io">Eureka</a>.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </footer>
+</body>
+
+<script>
+
+    timeoutIds = [];
+
+    function populateDemo(imgs, num) {
+        // Get the expanded image
+        var expandImg = document.getElementById("expandedImg-" + num);
+        // Get the image text
+        var imgText = document.getElementById("imgtext-" + num);
+        var answer = document.getElementById("answer-" + num);
+
+        // Use the same src in the expanded image as the image being clicked on from the grid
+        expandImg.src = imgs.src.replace(".png", ".mp4");
+        var video = document.getElementById('demo-video-' + num);
+        // or video = $('.video-selector')[0];
+        video.pause()
+        video.load();
+        video.play();
+        video.removeAttribute('controls');
+
+        console.log(expandImg.src);
+        // Use the value of the alt attribute of the clickable image as text inside the expanded image
+        var qa = imgs.alt.split("[sep]");
+        var q = qa[0].trim();
+        var file_path = qa[1].trim();
+        imgText.innerHTML = q;
+        answer.innerHTML = "";
+        // Show the container element (hidden with CSS)
+        expandImg.parentElement.style.display = "block";
+        for (timeoutId of timeoutIds) {
+            clearTimeout(timeoutId);
+        }
+
+        // NOTE (wliang): Modified from original to read from file instead
+        fetch(file_path)
+            .then(response => response.text())
+            .then(contents => {
+                // Call the processData function and pass the contents as an argument
+                typeWriter(contents, 0, q, num);
+            })
+            .catch(error => console.error('Error reading file:', error));
+    }
+
+    function typeWriter(txt, i, q, num) {
+        var imgText = document.getElementById("imgtext-" + num);
+        var answer = document.getElementById("answer-" + num);
+        if (imgText.innerHTML == q) {
+            for (let k = 0; k < 5; k++) {
+                if (i < txt.length) {
+                    if (txt.charAt(i) == "\\") {
+                        answer.innerHTML += "\n";
+                        i += 1;
+                    } else {
+                        answer.innerHTML += txt.charAt(i);
+                    }
+                    i++;
+                }
+            }
+            hljs.highlightAll();
+            timeoutIds.push(setTimeout(typeWriter, 1, txt, i, q, num));
+        }
+    }
+
+</script>
+
+</html>

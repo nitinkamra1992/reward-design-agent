@@ -1,0 +1,105 @@
+def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict) -> torch.Tensor:
+    # Gather key poses (vectorized torch.Tensors with shape (n, 3) / (n, 4))
+    tcp_p = self.agent.tcp.pose.p
+    charger_p = self.charger.pose.p
+
+    # Number of environments
+    n = tcp_p.shape[0]
+
+    # Subtask 1: Approach the charger (end-effector close to charger)
+    dist_tcp_charger = torch.linalg.norm(tcp_p - charger_p, dim=1)  # (n,)
+    reach_scale = 0.10  # meters
+    reward_reach_norm = torch.exp(-dist_tcp_charger / reach_scale).clamp(0.0, 1.0)  # [0,1]
+
+    # Subtask 2: Grasp the charger (binary indicator if available)
+    try:
+        is_grasp = self.agent.is_grasping(self.charger).to(dtype=torch.float32)  # (n,)
+    except Exception:
+        # Fallback if is_grasping is unavailable
+        is_grasp = torch.zeros_like(reward_reach_norm)
+
+    # Evaluate current progress toward insertion (position and orientation)
+    eval_dict = self.evaluate()
+    obj_to_goal_dist = eval_dict["obj_to_goal_dist"]  # (n,)
+    obj_to_goal_angle = eval_dict["obj_to_goal_angle"]  # (n,)
+    success = eval_dict["success"]  # (n,) bool
+    success_f = success.to(dtype=torch.float32)  # (n,)
+
+    # Subtask 4: Move charger to receptacle opening (distance to goal)
+    dist_scale = 0.05  # meters
+    reward_move_norm = torch.exp(-obj_to_goal_dist / dist_scale).clamp(0.0, 1.0)  # [0,1]
+
+    # Subtask 5: Align charger with receptacle slot (orientation difference)
+    angle_scale = 0.5  # radians
+    reward_align_norm = torch.exp(-obj_to_goal_angle / angle_scale).clamp(0.0, 1.0)  # [0,1]
+
+    # Subtask 3: Lift the charger off the table toward the target height (if goal_pose available)
+    if isinstance(obs, dict) and ("extra" in obs) and isinstance(obs["extra"], dict) and ("goal_pose" in obs["extra"]):
+        goal_pose = obs["extra"]["goal_pose"]  # (n, 7): [x, y, z, qw, qx, qy, qz]
+        goal_p = goal_pose[:, :3]  # (n, 3)
+        dz = torch.abs(charger_p[:, 2] - goal_p[:, 2])  # (n,)
+        z_scale = 0.05  # meters
+        reward_lift_norm = torch.exp(-dz / z_scale).clamp(0.0, 1.0)  # [0,1]
+    else:
+        reward_lift_norm = torch.zeros_like(reward_reach_norm)
+
+    # Gate certain rewards to encourage correct sequence (more weight after grasp)
+    gate = (0.2 + 0.8 * is_grasp).clamp(0.2, 1.0)  # in [0.2, 1.0]
+    reward_move_norm_gated = (reward_move_norm * gate).clamp(0.0, 1.0)
+    reward_align_norm_gated = (reward_align_norm * gate).clamp(0.0, 1.0)
+    reward_lift_norm_gated = (reward_lift_norm * gate).clamp(0.0, 1.0)
+
+    # Near-goal insertion-depth shaping (encourages final push)
+    # Modification: broaden activation range and soften distance decay so shaping provides
+    # meaningful incentive already around the opening (~3–5 cm).
+    close_scale = 3.0e-2  # 3 cm (was 1 cm)
+    near_mask = (obj_to_goal_dist <= 5.0e-2).to(dtype=torch.float32)  # within 5 cm (was 2 cm)
+    tight_angle_scale = 0.2  # radians, matches success angle threshold
+    align_tight = torch.exp(-obj_to_goal_angle / tight_angle_scale).clamp(0.0, 1.0)  # [0,1]
+    insert_gate = (is_grasp * align_tight).clamp(0.0, 1.0)  # require grasp and near-success alignment
+    reward_insert_precision_norm = torch.exp(-obj_to_goal_dist / close_scale).clamp(0.0, 1.0)
+    reward_insert_precision_norm = (reward_insert_precision_norm * near_mask * insert_gate).clamp(0.0, 1.0)  # [0,1]
+
+    # Subtask 6: Terminal success bonus (one-time on success ideally; here applied when success True)
+    terminal_bonus_weight = 10.0
+    reward_success_bonus = terminal_bonus_weight * success_f  # (n,)
+
+    # Component weights
+    w_reach = 0.6
+    w_grasp = 1.0
+    w_lift = 0.5
+    w_move = 1.0
+    w_align = 1.0
+    w_insert = 2.0
+
+    # Weighted components
+    c_reach = w_reach * reward_reach_norm
+    c_grasp = w_grasp * is_grasp
+    c_lift = w_lift * reward_lift_norm_gated
+    c_move = w_move * reward_move_norm_gated
+    c_align = w_align * reward_align_norm_gated
+    c_insert = w_insert * reward_insert_precision_norm
+
+    # Sum all components
+    reward = c_reach + c_grasp + c_lift + c_move + c_align + c_insert + reward_success_bonus  # (n,)
+
+    # Logging for analysis
+    self.reward_info = {
+        "reward_reach_charger": c_reach,
+        "reward_grasp": c_grasp,
+        "reward_lift_to_goal_z": c_lift,
+        "reward_move_to_goal_pos": c_move,
+        "reward_align_to_goal": c_align,
+        "reward_insert_precision": c_insert,
+        "reward_success_bonus": reward_success_bonus,
+        # Diagnostic for tight alignment gate (bounded [0,1])
+        "reward_align_tight_near_goal": align_tight,
+    }
+
+    return reward
+
+def compute_normalized_dense_reward(
+    self, obs: Any, action: torch.Tensor, info: Dict
+):
+    max_reward = 1.0
+    return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward
